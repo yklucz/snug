@@ -2,9 +2,9 @@
 
 A lightweight Python CLI archive manager.
 
-## Install
+Works on macOS, Linux, and Windows with Python 3.10+.
 
-Requires **Python 3.10+**.
+## Install
 
 ### macOS / Linux
 
@@ -14,40 +14,65 @@ curl -fsSL https://raw.githubusercontent.com/yklucz/snug/main/install.sh | bash
 
 ### Windows
 
-Run in PowerShell:
-
 ```powershell
 irm https://raw.githubusercontent.com/yklucz/snug/main/install.ps1 | iex
 ```
+
+## Supported formats
+
+| Format | Extract | Create |
+|---|:---:|:---:|
+| ZIP | ✅ | ✅ |
+| TAR / GZIP / BZIP2 / XZ / LZMA | ✅ | ✅ |
+| 7z | ✅ | ✅ |
+| RAR / RAR5 | ✅ | ❌ |
+| ZIPX | ✅ | ❌ |
+| CAB / ISO | ✅ | ❌ |
+| CPIO / AR | ✅ | ✅ |
+| XAR / LHA / LZH | ✅ | ❌ |
+| WARC / RPM / DEB | ✅ | ❌ |
+
+Some formats require optional `py7zr` or `libarchive` backends.
 
 ## Usage
 
 ```bash
 snug
+
+snug create backup.zip folder/
+snug create backup.7z folder/
+
+snug extract archive.rar -C output/
+snug list backup.7z
+snug info backup.7z
 ```
 
-Create an archive:
+## Passwords
 
 ```bash
-snug create backup.tar.gz folder/
+snug extract protected.7z --password
+snug create protected.7z folder/ --password
 ```
 
-Extract an archive:
+Passwords are entered securely and are never printed.
+
+## Features
+
+- Interactive terminal interface
+- Live progress, speed, and ETA
+- Large-file streaming
+- ZIP64 support
+- Automatic archive format detection
+- Secure extraction against path traversal and unsafe links
+- Cross-platform support
+
+## Development
 
 ```bash
-snug extract backup.tar.gz
+python -m pip install '.[all,test]'
+pytest -q
 ```
 
-List archive contents:
+## License
 
-```bash
-snug list backup.tar.gz
-```
-
-Show archive information:
-
-```bash
-snug info backup.tar.gz
-```
-
-Supports ZIP, TAR, GZIP, BZIP2, and XZ.
+See [LICENSE](LICENSE).

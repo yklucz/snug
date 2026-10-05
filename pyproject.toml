@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "snug-archives"
+version = "1.8.0"
+description = "A lightweight Python CLI archive manager."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/yklucz/snug"
+
+[project.scripts]
+snug = "snug:main"
+
+[project.optional-dependencies]
+extended = ["libarchive-c>=5.3,<6"]
+7z = ["py7zr>=1.1.3,<2"]
+all = ["libarchive-c>=5.3,<6", "py7zr>=1.1.3,<2"]
+test = ["pytest>=8,<10"]
+
+[tool.setuptools]
+py-modules = ["snug", "snug_core", "snug_ext"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.pyright]
+include = ["snug.py", "snug_core.py", "snug_ext.py"]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"
