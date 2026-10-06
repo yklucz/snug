@@ -4,6 +4,8 @@
 
 Snug treats archive member paths and link targets as untrusted. Decoding backends provide entries and bytes; Snug controls extraction paths and filesystem writes. These checks reduce archive-driven path escapes, but they do not sandbox Python, py7zr, or native libarchive.
 
+For private vulnerability reporting and supported versions, see the [Security Policy](../SECURITY.md).
+
 ## Member paths and destination containment
 
 Member-name validation normalizes backslashes as separators and rejects `..` traversal components, absolute paths, Windows drive paths (including drive-relative forms), and NUL bytes. This happens before `--strip-components`, so stripping does not make an unsafe name acceptable. On Windows, reserved device names, trailing dots/spaces, and alternate-data-stream components are also rejected.

@@ -16,7 +16,7 @@ NEW_LAUNCHER="$(mktemp "$BIN_DIR/.snug-launcher.XXXXXX")"
 trap 'rm -rf "$STAGING"; rm -f "$NEW_LAUNCHER"' EXIT
 printf '==> Downloading Snug\n'
 for source in snug.py snug_core.py snug_ext.py snug_runtime.py runtime.sh runtime-lock.json; do
-  curl -fsSL --retry 2 "$RAW_BASE/$source" -o "$STAGING/$source"
+  curl -fsSL --proto '=https' --proto-redir '=https' --retry 2 "$RAW_BASE/$source" -o "$STAGING/$source"
 done
 # All backends must validate before replacing an existing working installation.
 bash "$STAGING/runtime.sh" "$STAGING" --prepare

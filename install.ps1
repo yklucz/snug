@@ -7,12 +7,41 @@ $InstallRoot = Join-Path $env:LOCALAPPDATA 'Snug'
 $Staging = Join-Path $env:LOCALAPPDATA ('.snug-install-' + [Guid]::NewGuid().ToString('N'))
 $Backup = $InstallRoot + '.previous'
 
+function Save-HttpsFile([Uri]$Uri, [string]$Destination) {
+    # Follow redirects ourselves so Windows PowerShell 5.1 cannot downgrade TLS.
+    for ($Redirects = 0; $Redirects -le 10; $Redirects++) {
+        if ($Uri.Scheme -ne 'https') { throw 'Snug downloads and redirects require HTTPS.' }
+        $Request = [Net.WebRequest]::Create($Uri)
+        $Request.AllowAutoRedirect = $false
+        $Request.Timeout = 60000
+        $Request.ReadWriteTimeout = 60000
+        $Response = $Request.GetResponse()
+        try {
+            $Status = [int]$Response.StatusCode
+            if ($Status -in @(301, 302, 303, 307, 308)) {
+                if ($Redirects -eq 10) { throw 'Snug download exceeded its redirect limit.' }
+                $Location = $Response.Headers['Location']
+                if (-not $Location) { throw 'Snug download redirect has no destination.' }
+                $Uri = [Uri]::new($Uri, $Location)
+                continue
+            }
+            if ($Status -lt 200 -or $Status -ge 300) { throw "Snug download failed with HTTP status $Status." }
+            $Source = $Response.GetResponseStream()
+            try {
+                $Output = [IO.File]::Open($Destination, [IO.FileMode]::Create)
+                try { $Source.CopyTo($Output) } finally { $Output.Dispose() }
+            } finally { $Source.Dispose() }
+            return
+        } finally { $Response.Dispose() }
+    }
+}
+
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 New-Item -ItemType Directory -Path $Staging | Out-Null
 try {
     Write-Host '==> Downloading Snug'
     foreach ($Source in @('snug.py', 'snug_core.py', 'snug_ext.py', 'snug_runtime.py', 'runtime.ps1', 'runtime-lock.json')) {
-        Invoke-WebRequest -UseBasicParsing -Uri "$RawBase/$Source" -OutFile (Join-Path $Staging $Source)
+        Save-HttpsFile ([Uri]"$RawBase/$Source") (Join-Path $Staging $Source)
     }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Staging 'runtime.ps1') -PrepareOnly
     if ($LASTEXITCODE -ne 0) { throw 'The staged installation failed validation; the existing installation was kept.' }

@@ -9,6 +9,35 @@ $BuiltinModules = [IO.Path]::Combine($PSHOME, 'Modules')
 $env:PSModulePath = $BuiltinModules + [IO.Path]::PathSeparator + $env:PSModulePath
 $Root = $PSScriptRoot
 
+function Save-HttpsFile([Uri]$Uri, [string]$Destination) {
+    # Follow redirects ourselves so Windows PowerShell 5.1 cannot downgrade TLS.
+    for ($Redirects = 0; $Redirects -le 10; $Redirects++) {
+        if ($Uri.Scheme -ne 'https') { throw 'Snug downloads and redirects require HTTPS.' }
+        $Request = [Net.WebRequest]::Create($Uri)
+        $Request.AllowAutoRedirect = $false
+        $Request.Timeout = 60000
+        $Request.ReadWriteTimeout = 60000
+        $Response = $Request.GetResponse()
+        try {
+            $Status = [int]$Response.StatusCode
+            if ($Status -in @(301, 302, 303, 307, 308)) {
+                if ($Redirects -eq 10) { throw 'Snug download exceeded its redirect limit.' }
+                $Location = $Response.Headers['Location']
+                if (-not $Location) { throw 'Snug download redirect has no destination.' }
+                $Uri = [Uri]::new($Uri, $Location)
+                continue
+            }
+            if ($Status -lt 200 -or $Status -ge 300) { throw "Snug download failed with HTTP status $Status." }
+            $Source = $Response.GetResponseStream()
+            try {
+                $Output = [IO.File]::Open($Destination, [IO.FileMode]::Create)
+                try { $Source.CopyTo($Output) } finally { $Output.Dispose() }
+            } finally { $Source.Dispose() }
+            return
+        } finally { $Response.Dispose() }
+    }
+}
+
 function Quote-NativeArgument([string]$Value) {
     # Windows CommandLineToArgvW quoting, including trailing backslashes.
     $Escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
@@ -69,7 +98,7 @@ function Install-Python {
     New-Item -ItemType Directory -Path $Temporary | Out-Null
     try {
         $Zip = Join-Path $Temporary 'python.zip'
-        Invoke-WebRequest -UseBasicParsing -Uri $Artifact.url -OutFile $Zip
+        Save-HttpsFile ([Uri]$Artifact.url) $Zip
         if ((Get-FileHash -Algorithm SHA256 -LiteralPath $Zip).Hash.ToLowerInvariant() -ne $Artifact.sha256) { throw 'Python download checksum mismatch.' }
         $Staged = Join-Path $Temporary 'python'
         Expand-Archive -LiteralPath $Zip -DestinationPath $Staged

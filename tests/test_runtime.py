@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from email.message import Message
 import io
 import json
 import os
@@ -9,6 +10,8 @@ import shutil
 import subprocess
 import sys
 import tarfile
+from types import SimpleNamespace
+import urllib.response
 import zipfile
 from pathlib import Path
 
@@ -68,11 +71,46 @@ def test_failed_download_keeps_existing_files_and_cleans_staging(tmp_path, monke
 
 
 def test_download_rejects_tampering(tmp_path, monkeypatch):
-    monkeypatch.setattr(runtime.urllib.request, 'urlopen', lambda *args, **kwargs: io.BytesIO(b'changed'))
+    monkeypatch.setattr(runtime.urllib.request, 'build_opener',
+                        lambda *args: SimpleNamespace(open=lambda *args, **kwargs: io.BytesIO(b'changed')))
     with pytest.raises(RuntimeError, match='checksum'):
         runtime.download({'url': 'https://example.test/artifact', 'sha256': '0' * 64}, tmp_path / 'download')
     with pytest.raises(RuntimeError, match='HTTPS'):
         runtime.download({'url': 'http://example.test/artifact'}, tmp_path / 'download')
+
+
+@pytest.mark.parametrize('redirect', ['https://example.test/verified', 'http://example.test/unsafe'])
+def test_runtime_download_validates_redirect_before_following(tmp_path, monkeypatch, redirect):
+    requested = []
+    body = b'verified artifact'
+
+    class OfflineHTTPSHandler(runtime.urllib.request.HTTPSHandler):
+        def https_open(self, request):
+            requested.append(request.full_url)
+            headers = Message()
+            if len(requested) == 1:
+                headers['Location'] = redirect
+                response = urllib.response.addinfourl(io.BytesIO(), headers, request.full_url, 302)
+                response.msg = 'Found'
+            else:
+                response = urllib.response.addinfourl(io.BytesIO(body), headers, request.full_url, 200)
+                response.msg = 'OK'
+            return response
+
+    build_opener = runtime.urllib.request.build_opener
+    monkeypatch.setattr(runtime.urllib.request, 'build_opener',
+                        lambda *handlers: build_opener(*handlers, OfflineHTTPSHandler()))
+    artifact = {'url': 'https://example.test/artifact', 'sha256': hashlib.sha256(body).hexdigest()}
+    target = tmp_path / 'download'
+    if redirect.startswith('http:'):
+        with pytest.raises(RuntimeError, match='redirects require HTTPS'):
+            runtime.download(artifact, target)
+        assert requested == [artifact['url']]
+        assert not target.exists()
+    else:
+        runtime.download(artifact, target)
+        assert requested == [artifact['url'], redirect]
+        assert target.read_bytes() == body
 
 
 @pytest.mark.parametrize('minor', range(10, 15))
@@ -277,11 +315,38 @@ def test_failed_installer_preserves_previous_app_and_launcher(brew_app, tmp_path
     launcher = prefix / 'bin/snug'
     launcher.parent.mkdir()
     launcher.write_text('previous launcher')
-    env = dict(env, SNUG_TEST_OFFLINE='1', SNUG_PREFIX=str(prefix), SNUG_RAW_BASE=ROOT.as_uri())
+    # Serve repository files through an offline curl stand-in; the installer
+    # now rejects file:// URLs as well as insecure network URLs.
+    commands = tmp_path / 'commands'
+    commands.mkdir()
+    curl = commands / 'curl'
+    curl.write_text('''#!/usr/bin/env bash
+set -eu
+url="${@: -3:1}"
+target="${@: -1}"
+cp "$SNUG_TEST_SOURCE/${url##*/}" "$target"
+''')
+    curl.chmod(0o755)
+    env = dict(env, SNUG_TEST_OFFLINE='1', SNUG_PREFIX=str(prefix), SNUG_RAW_BASE='https://example.test/snug',
+               SNUG_TEST_SOURCE=str(ROOT), PATH=str(commands) + os.pathsep + env['PATH'])
     result = subprocess.run(['bash', str(ROOT / 'install.sh')], env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode != 0
     assert (previous / 'marker').read_text() == 'previous application'
     assert launcher.read_text() == 'previous launcher'
+    assert not list((prefix / 'share').glob('.snug-install*'))
+    assert not list((prefix / 'bin').glob('.snug-launcher*'))
+
+
+def test_unix_installer_rejects_insecure_download_before_installing(tmp_path):
+    if os.name == 'nt' or not shutil.which('curl'):
+        pytest.skip('requires Unix curl')
+    prefix = tmp_path / 'installation'
+    env = dict(os.environ, SNUG_PREFIX=str(prefix), SNUG_RAW_BASE='http://127.0.0.1:1/snug')
+    result = subprocess.run(['bash', str(ROOT / 'install.sh')], env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0
+    assert 'disabled' in result.stderr.lower(), result.stderr
+    assert not (prefix / 'share/snug').exists()
     assert not list((prefix / 'share').glob('.snug-install*'))
     assert not list((prefix / 'bin').glob('.snug-launcher*'))
 

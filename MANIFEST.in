@@ -1,0 +1,26 @@
+# A source release remains auditable and can run the public test suite.
+include README.md LICENSE SECURITY.md CONTRIBUTING.md
+include .gitattributes .gitignore
+include install.sh install.ps1 runtime.sh runtime.ps1 runtime-lock.json
+include snug_runtime.py
+recursive-include docs *.md
+recursive-include scripts *.py
+recursive-include tests *.py
+recursive-include tests/fixtures *
+
+# Generated and local state never belongs in a release artifact.
+prune .git
+prune .github
+prune .venv
+prune venv
+prune env
+prune build
+prune dist
+prune vendor
+prune packages
+prune native
+prune python
+global-exclude __pycache__ *.py[cod] .snug-files.json runtime.json
+global-exclude .env .env.* *.pem *.key *.p12 *.pfx *.part *.tmp *.log
+global-exclude .DS_Store Thumbs.db .envrc .pypirc .coverage .coverage.*
+global-exclude *.so *.dylib *.dll *.whl

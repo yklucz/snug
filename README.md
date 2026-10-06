@@ -31,7 +31,7 @@ snug info backup.7z
 
 ## Supported formats
 
-Supports ZIP, TAR, GZIP, BZIP2, XZ, LZMA, 7z, RAR, ZIPX, CAB, ISO, CPIO, AR, XAR, LHA/LZH, WARC, RPM, and DEB.
+Creates ZIP, TAR variants, standalone compression streams, 7z, CPIO, and AR. Extracts these and additional formats including RAR, ZIPX, CAB, ISO, XAR, LHA/LZH, WARC, RPM, and DEB when the required backend is installed.
 
 See [Supported formats](docs/supported-formats.md) for creation support, backend requirements, and limitations.
 
@@ -45,6 +45,8 @@ See [Supported formats](docs/supported-formats.md) for creation support, backend
 - [Development](docs/development.md)
 - [Runtime management](docs/runtime.md)
 - [Troubleshooting](docs/troubleshooting.md)
+
+For contributions, see [CONTRIBUTING.md](CONTRIBUTING.md). For vulnerability reports, see [SECURITY.md](SECURITY.md).
 
 ## License
 

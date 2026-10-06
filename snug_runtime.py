@@ -15,6 +15,7 @@ import sys
 import sysconfig
 import tarfile
 import tempfile
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -106,11 +107,21 @@ def check(root: Path = APP, backend: str = "all") -> None:
         check_backend(name)
 
 
+class HTTPSRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject a redirect downgrade before urllib sends the next request."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme.lower() != "https":
+            raise RuntimeError("runtime download redirects require HTTPS")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def download(artifact: dict[str, Any], target: Path) -> None:
     url = artifact["url"]
-    if not url.startswith("https://"):
+    if urllib.parse.urlsplit(url).scheme.lower() != "https":
         raise RuntimeError("runtime downloads require HTTPS")
-    with urllib.request.urlopen(url, timeout=60) as source, target.open("wb") as output:
+    opener = urllib.request.build_opener(HTTPSRedirectHandler())
+    with opener.open(url, timeout=60) as source, target.open("wb") as output:
         shutil.copyfileobj(source, output, 1024 * 1024)
     if hashlib.sha256(target.read_bytes()).hexdigest() != artifact["sha256"]:
         raise RuntimeError(f"download checksum mismatch: {target.name}")

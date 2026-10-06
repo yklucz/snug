@@ -19,7 +19,7 @@ The Pyright command requires Node.js/npm and downloads that version when it is n
 python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py tests
 ```
 
-The [CI workflow](../.github/workflows/tests.yml) declares macOS, Linux, and Windows jobs on Python 3.10 and 3.14. It installs `.[all,test]` plus native libarchive and runs compilation and pytest. Review actual job results before claiming that every platform has passed.
+The [CI workflow](../.github/workflows/tests.yml) runs core tests on Linux with Python 3.10–3.14 and platform tests on macOS and Windows with Python 3.14. It installs `.[all,test]` plus native libarchive and runs compilation and pytest. Linux Python 3.14 also runs the pinned Pyright version and validates built artifacts. Review actual job results before claiming that every platform has passed.
 
 ## Project layout
 
@@ -33,10 +33,36 @@ The [CI workflow](../.github/workflows/tests.yml) declares macOS, Linux, and Win
 | [runtime.sh](../runtime.sh), [runtime.ps1](../runtime.ps1) | Platform startup and dependency repair |
 | [runtime-lock.json](../runtime-lock.json) | Managed artifact URLs, versions, hashes, DLL/license members |
 | [pyproject.toml](../pyproject.toml) | Package metadata, extras, CLI entry point, pytest/Pyright configuration |
+| [MANIFEST.in](../MANIFEST.in) | Source-distribution contents and generated-file exclusions |
+| `scripts/` | Developer release checks, including [artifact validation](../scripts/check_release.py) |
 | `tests/` | Test suite and vendored archive fixtures |
 | `docs/` | User and developer documentation |
 
-The wheel packages `snug`, `snug_core`, and `snug_ext`, with the `snug = snug:main` entry point. `snug_runtime.py` and the platform launchers are delivered by managed installers rather than listed as wheel modules.
+This checkout declares version `1.8.0` in both package metadata and `snug_core.__version__`. Keep those values aligned with the CLI version and tests when preparing a release.
+
+The flat module layout remains intentional for the current release: installers fetch those module filenames directly, and existing imports and the `snug = snug:main` entry point depend on them. `runtime.sh` and `runtime.ps1` are required managed-runtime launchers, so they remain public at the root with the installers.
+
+## Public source and release artifacts
+
+The Git repository contains all four implementation modules, tests and legal fixtures, documentation, CI, installers, runtime helpers, and lock metadata. Tests and security-related implementation remain public so the complete behavior can be audited. Public artifact URLs, versions, and SHA256 hashes in `runtime-lock.json` are reproducibility data.
+
+The source distribution includes the modules, tests/fixtures, docs, developer scripts, lock, installers, runtime helpers, license, and contribution/security policies. It deliberately excludes `.github/`, local settings, generated runtime directories, caches, environments, and test outputs. CI workflows remain in the Git repository.
+
+The wheel installs `snug`, `snug_core`, and `snug_ext`, the CLI entry point, and package metadata/license. It does not install tests, docs, CI, managed dependencies, or the managed-only `snug_runtime.py`, lock, and platform scripts into `site-packages`. The complete runtime-management source remains public in Git and the source distribution. Source/pip commands use their chosen environment rather than automatic repair.
+
+Build both artifacts in a temporary or ignored output directory:
+
+```bash
+python -m pip install build
+python -m build
+python scripts/check_release.py dist
+```
+
+The release checker requires one source distribution and one wheel in a clean output directory. It compares included public source files with the checkout and rejects unnecessary wheel contents or local/generated files. Install the wheel into a fresh environment and run `snug --version` plus a native ZIP round trip. Validate the source distribution from outside the checkout so imports cannot silently fall back to repository files. Managed Windows artifacts are pinned in the lock; Homebrew packages, pip extras, and the setuptools/build toolchain use version ranges, so identical dependency resolution and byte-for-byte reproducible artifacts are not promised.
+
+## Layout work deferred to 2.0
+
+A future `src/snug/` package may separate the CLI, core policy, runtime management, and backends. Treat that as a 2.0 migration with compatibility coverage for imports, the CLI entry point, pip builds, installer download paths, and platform launchers. The current cleanup preserves the flat layout and root install URLs.
 
 ## Tests and fixture provenance
 
