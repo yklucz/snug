@@ -342,13 +342,15 @@ def test_sevenzip_escaping_symlink(engine, tmp_path, py7zr_backend):
     source = tmp_path / "source/escape"
     source.parent.mkdir()
     try:
-        # Use a file link: Windows directory reparse points are classified as
-        # junctions by py7zr and exercise a separate unsupported-entry policy.
-        source.symlink_to("../outside.txt", target_is_directory=False)
+        # Use a file link with native separators: Windows stores relative
+        # targets verbatim, and a forward slash can leave the link unresolved.
+        source.symlink_to(Path("..") / outside.name, target_is_directory=False)
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"platform cannot create symlinks: {exc}")
     archive = tmp_path / "bad.7z"
-    assert source.is_file()
+    assert source.is_symlink()
+    # py7zr requires a resolvable target when creating the adversarial archive.
+    assert source.read_bytes() == outside.read_bytes()
     with py7zr_backend.SevenZipFile(archive, "w") as handle:
         handle.write(source, "escape")
     assert engine.list_entries(archive)[0].is_symlink
