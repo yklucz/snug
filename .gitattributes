@@ -1,0 +1,11 @@
+# Preserve archive fixture bytes for checksum tests on every platform.
+tests/fixtures/*.7z binary
+tests/fixtures/*.cab binary
+tests/fixtures/*.iso binary
+tests/fixtures/*.lzh binary
+tests/fixtures/*.rar binary
+tests/fixtures/*.rpm binary
+tests/fixtures/*.warc binary
+tests/fixtures/*.xar binary
+tests/fixtures/*.zip binary
+tests/fixtures/*.zipx binary

@@ -1,0 +1,35 @@
+WARC/1.0
+WARC-Type: warcinfo
+WARC-Date: 2014-06-10T11:31:38Z
+Last-Modified: 2014-06-10T11:31:38Z
+WARC-Record-ID: <urn:uuid:355f97bb-5c28-4cdd-b17a-b0887fb1c28c>
+Content-Type: application/warc-fields
+Content-Length: 59
+
+software: libarchive/3.1.2
+format: WARC file version 1.0
+
+
+WARC/1.0
+WARC-Type: resource
+WARC-Target-URI: file://sometest.txt
+WARC-Date: 2014-06-10T11:31:38Z
+Last-Modified: 2014-06-10T11:30:33Z
+WARC-Record-ID: <urn:uuid:759ac264-665d-4cae-9b5e-af421fa43054>
+Content-Length: 65
+
+This is a sample text file for libarchive's WARC reader/writer.
+
+
+
+WARC/1.0
+WARC-Type: resource
+WARC-Target-URI: file://moretest.txt
+WARC-Date: 2014-06-10T11:31:38Z
+Last-Modified: 2014-06-10T11:31:24Z
+WARC-Record-ID: <urn:uuid:71a4f821-6454-4d23-a972-497e6d25cf7f>
+Content-Length: 76
+
+The beauty is that WARC remains ASCII only iff all contents are ASCII only.
+
+

@@ -1,0 +1,68 @@
+[
+  {
+    "name": "sample-traditional.zip",
+    "size": 167,
+    "sha256": "17e0ba0ca9d9ee058f0b99cce76a8fb6d9c4eadfdc32865a7d2c230aa01b6c2d",
+    "source": null
+  },
+  {
+    "name": "sample.xar",
+    "size": 475,
+    "sha256": "378a961923042d2821d6ae5157825c439f4747a1d8eca65b05bb57c24a475218",
+    "source": null
+  },
+  {
+    "name": "test_read_format_7zip_lzma1_2.7z",
+    "size": 220,
+    "sha256": "8022933fc37a019640c9e85cc5a92727b2f9e452d1c32889c513eb79cd2fcdef",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.8.1/libarchive/test/test_read_format_7zip_lzma1_2.7z.uu"
+  },
+  {
+    "name": "test_read_format_cab_1.cab",
+    "size": 266,
+    "sha256": "0672797c111fca020fefe1b4b86de410f0eed36b52482a5bd282527392124d0e",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.8.1/libarchive/test/test_read_format_cab_1.cab.uu"
+  },
+  {
+    "name": "test_read_format_cpio_svr4_gzip_rpm.rpm",
+    "size": 1909,
+    "sha256": "dcc4f3ab933335bf3822d94079fdf4f0b7ac4c65773ca8e9a973a1cec7c553d6",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.8.1/libarchive/test/test_read_format_cpio_svr4_gzip_rpm.rpm.uu"
+  },
+  {
+    "name": "test_read_format_iso_2.iso",
+    "size": 358400,
+    "sha256": "ba5fe934b5ae6cb16f82ac865314a4bdf3656ec4c1ce08f3f0d3bb5af429ee15",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.8.1/libarchive/test/test_read_format_iso_2.iso.Z.uu"
+  },
+  {
+    "name": "test_read_format_lha_header0.lzh",
+    "size": 348,
+    "sha256": "286b32e0f5c98016944681e4694b0c7be5c0575570c876d6fc63195a09d3c508",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.8.1/libarchive/test/test_read_format_lha_header0.lzh.uu"
+  },
+  {
+    "name": "test_read_format_rar.rar",
+    "size": 336,
+    "sha256": "d421b86f6290aefad61b2a36737253b2b30fe27c156bd95abfc230f24fe0307e",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.8.1/libarchive/test/test_read_format_rar.rar.uu"
+  },
+  {
+    "name": "test_read_format_rar5_compressed.rar",
+    "size": 436,
+    "sha256": "68f9d7e2662cd5bc5607ba9c6bf1edbf121cf3b08011a7d8643091791750a7c8",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.8.1/libarchive/test/test_read_format_rar5_compressed.rar.uu"
+  },
+  {
+    "name": "test_read_format_warc.warc",
+    "size": 891,
+    "sha256": "611780e6ce303d285bd7ead73f7ee7fe1faf5c8e23014cc1bc4f345a50354a28",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.8.1/libarchive/test/test_read_format_warc.warc.uu"
+  },
+  {
+    "name": "test_read_format_zip_ppmd8.zipx",
+    "size": 616,
+    "sha256": "3524501a47b1947a162cb2b33ccabc8d2bd8c2311b86c0a6af6f7ba28eedbf6e",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.8.1/libarchive/test/test_read_format_zip_ppmd8.zipx.uu"
+  }
+]
