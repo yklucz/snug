@@ -1,12 +1,16 @@
 # Contributing
 
+`main` is the canonical branch for shared CLI/archive development and primarily supports macOS and Linux. [`windows`](https://github.com/yklucz/snug/tree/windows) maintains the Windows installer, PowerShell runtime, native dependencies, packaging, and platform tests. Port relevant shared fixes intentionally, preferably by cherry-picking focused commits after the branches diverge. Keep one shared archive-engine design.
+
+Snug remains terminal-only: full command names and the existing terminal TUI/file picker are part of its public interface. Do not add implicit path dispatch, single-letter aliases, desktop integrations, or graphical interfaces.
+
 Use Python 3.10 or newer and an isolated environment. Install native libarchive using the [installation instructions](docs/installation.md), then run:
 
 ```bash
 git clone https://github.com/yklucz/snug.git
 cd snug
 python -m pip install '.[all,test]'
-python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py tests
+python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py snug_update.py tests
 npx --yes pyright@1.1.414
 pytest -q
 ```
@@ -19,5 +23,6 @@ Pyright requires Node.js/npm. Optional-backend and platform tests can skip when 
 - Keep fixtures small and redistributable, with provenance and required licenses in [tests/fixtures](tests/fixtures/README.md).
 - Keep downloaded runtimes, caches, local settings, generated outputs, and credentials out of commits.
 - Route archive writes through the existing safety helpers and retain download verification.
+- Keep updater tests offline, isolate update state, and preserve the installed application when staged update validation or replacement fails.
 
 Describe the problem, resulting behavior, and checks run in your pull request. See [Development](docs/development.md) for architecture, artifact policy, and runtime changes. Report unpatched vulnerabilities through the [Security Policy](SECURITY.md).

@@ -12,6 +12,7 @@ snug create --help
 snug extract --help
 snug list --help
 snug info --help
+snug update --help
 ```
 
 With no arguments, Snug opens a terminal menu for creation, extraction, listing, and information. Use arrow keys and Enter to choose an action; `q` exits. The creation picker supports directory navigation, Space to mark sources, and `/` to filter. It offers formats writable by installed backends. Password options are available through subcommands rather than interactive prompts.
@@ -23,7 +24,34 @@ snug create ARCHIVE SOURCE [SOURCE ...] [options]
 snug extract ARCHIVE [options]
 snug list ARCHIVE [options]
 snug info ARCHIVE [options]
+snug update [--check | --enable-checks | --disable-checks]
 ```
+
+Use the full command name. `snug folder/`, `snug archive.zip`, `snug file.txt`, and single-letter aliases are invalid; Snug does not infer an operation from a path. `extract` accepts one archive per command. `create` already accepts multiple files and directories.
+
+## Paths inserted by terminals
+
+Dragging a file into a terminal may insert its quoted or escaped path. Keep the explicit command and pass that path as one argument:
+
+```bash
+snug create backup.zip "/Users/lucas/Desktop/My Folder"
+snug extract "/Users/lucas/Downloads/My Archive.7z" -C "restored files/"
+snug create notes.zip "Tài liệu 📦/" "author's notes.txt" 'double "quotes".txt'
+```
+
+Quoting is handled by your shell; Snug receives argument values directly and does not evaluate path strings as shell commands. Spaces, Unicode, Vietnamese text, emoji, quotes, apostrophes, dots, parentheses, and brackets are preserved subject to filesystem limits.
+
+For positional filenames beginning with `-`, use the normal `--` separator. Put options before the separator:
+
+```bash
+snug create archive.zip -- -important-file.txt
+snug create -q -- -backup.zip -important-file.txt
+snug list -- -backup.zip
+snug info -- -backup.zip
+snug extract -C output/ -- -backup.zip
+```
+
+For a leading-hyphen option value, use `=` or an explicit relative path: `snug extract --directory=-output -- -backup.zip` or `snug extract -C ./-output -- -backup.zip`. Quoting a leading hyphen alone does not stop argparse from treating it as an option. All paths after `--` are positional arguments.
 
 ## Create archives
 
@@ -142,6 +170,17 @@ snug extract protected.7z -C output/ --password-file password.txt
 The final LF or CRLF is removed; spaces are preserved, and embedded line breaks are rejected. Snug refuses a prompt that cannot hide input. It does not print passwords as part of normal output, and optional-backend error messages redact the supplied password. Protect password files yourself; see [Security](security.md#passwords-and-terminal-output).
 
 Only 7z creation supports password protection. Traditional encrypted ZIP can be extracted by the native reader. TAR and standalone streams have no password support, and encrypted RAR extraction is unsupported. See [Supported formats](supported-formats.md) for backend-specific limits.
+
+## Updates
+
+```bash
+snug update --check
+snug update
+snug update --disable-checks
+snug update --enable-checks
+```
+
+Checks report the latest stable release; only `snug update` requests installation. Supported installer-owned copies update from a verified staged release. Source checkouts, pip installations, and older managed copies receive installation-method guidance. Automatic checks never install a release. See [Updates](updates.md) for network behavior, check interval, state, and failed-update recovery.
 
 ## Exit status
 

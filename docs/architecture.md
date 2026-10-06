@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-Snug separates terminal interaction, archive policy, decoding libraries, and managed-runtime setup. The command-line and interactive interfaces call the same `ArchiveEngine`.
+Snug is terminal-only. It separates terminal interaction, archive policy, decoding libraries, and managed-runtime setup. The command-line and interactive interfaces call the same `ArchiveEngine`.
 
 ```text
 snug.py: CLI and terminal interface
@@ -11,7 +11,7 @@ snug.py: CLI and terminal interface
     ├── 7z backend: SevenZipBackend (snug_ext.py)
     └── libarchive backend: LibarchiveBackend (snug_ext.py)
 
-Managed launcher: runtime.sh or runtime.ps1
+Managed macOS/Linux launcher: runtime.sh
 └── snug_runtime.py: check/repair dependencies, then call snug.main
 ```
 
@@ -21,7 +21,7 @@ Managed launcher: runtime.sh or runtime.ps1
 
 The default order is native ZIP/TAR, native streams, py7zr, then libarchive. Reading filters available backends by the detected format and asks each candidate whether it can read the file. Writing chooses the first available writer for the requested format. `writable_formats()` combines those checks for the interactive menu and `info`.
 
-The optional-backend module loads third-party libraries lazily. Missing dependencies leave source-installed native formats usable. Managed launchers additionally validate both optional backends before starting any command. Once an operation has selected a reader, decoding errors propagate; there is no automatic retry of partially completed extraction with a second backend.
+The optional-backend module loads third-party libraries lazily. Missing dependencies leave source-installed native formats usable. Managed launchers additionally validate both optional backends before archive commands and the terminal TUI; the Unix launcher lets `update` use an already resolved Python without optional-backend probes or repair. Once an operation has selected a reader, decoding errors propagate; there is no automatic retry of partially completed extraction with a second backend.
 
 ## Native Python formats
 
@@ -63,3 +63,9 @@ Permissions and modification times are restored when available and enabled. Perm
 ## Managed runtime boundary
 
 [snug_runtime.py](../snug_runtime.py), the platform launchers, and [runtime-lock.json](../runtime-lock.json) belong to the managed installation workflow. They activate application-owned bindings/packages, locate native libraries, probe dependencies, and repair failures before calling the CLI. They are separate from the source/pip entry point. [Runtime management](runtime.md) explains integrity, ownership, and update procedures; [Development](development.md) describes extension points.
+
+## CLI update boundary
+
+[snug_update.py](../snug_update.py) handles release metadata, per-user update state, and explicit installer-owned application updates. It does not inspect archive payloads or send archive paths in its requests. Periodic checks are best effort and separate from archive command success. Manual updates stage a verified release and validate it before replacing the installed application; source and pip installations receive guidance for their own installation method.
+
+Windows-specific launcher/runtime maintenance lives on the [`windows` branch](https://github.com/yklucz/snug/tree/windows). Shared archive code and portable runtime helpers may remain cross-platform on `main` without desktop integration. See [Updates](updates.md) for check controls, installation ownership, and failure behavior.

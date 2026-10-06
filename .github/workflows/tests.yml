@@ -36,7 +36,7 @@ jobs:
         run: brew install libarchive
       - name: Compile and test
         run: |
-          python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py tests
+          python -m compileall -q snug.py snug_core.py snug_ext.py snug_update.py snug_runtime.py tests
           python -m pytest -q
       - name: Type check
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14'
@@ -51,6 +51,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14'
         shell: bash
         run: |
+          export SNUG_NO_UPDATE_CHECK=1
           python -m venv "$RUNNER_TEMP/snug-wheel"
           "$RUNNER_TEMP/snug-wheel/bin/python" -m pip install --no-deps dist/*.whl
           cd "$RUNNER_TEMP"

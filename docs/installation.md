@@ -2,13 +2,14 @@
 
 [← Back to README](../README.md)
 
+On `main`, Snug supports macOS and Linux through explicit CLI commands and a terminal TUI. Windows setup is maintained on the [`windows` branch](https://github.com/yklucz/snug/tree/windows); use its [installation guide](https://github.com/yklucz/snug/blob/windows/docs/installation.md).
+
 Choose a managed installer for automatic backend setup and dependency repair, or install from source to manage Python and dependencies yourself. Managed installation and dependency downloads require internet access. A healthy installation can work offline.
 
 ## Requirements
 
 - Source installations require Python 3.10 or newer, as declared in [pyproject.toml](../pyproject.toml). The base package has no third-party Python dependencies.
 - The macOS/Linux installer requires Bash, `curl`, and Homebrew (Linuxbrew on Linux). It uses Homebrew's Python environment for `py7zr`.
-- The Windows managed installer targets 64-bit Windows 10/11 and requires Windows PowerShell (`powershell.exe`). It accepts standard, GIL-enabled x64 CPython 3.10–3.14, or downloads the locked embedded x64 runtime.
 - Extended formats require both the `libarchive-c` Python binding and a native libarchive library. Managed installations require libarchive 3.8+ with the readers and writers checked at startup. Source installations depend on their installed library's capabilities.
 
 ## macOS
@@ -50,24 +51,9 @@ snug --version
 
 For a source installation without Linuxbrew, use your distribution's Python and native libarchive packages as described below.
 
-## Windows
-
-Run in PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/yklucz/snug/main/install.ps1 | iex
-snug --version
-```
-
-Application files live under `%LOCALAPPDATA%\Snug`. The installer creates `bin\snug.cmd`, appends that directory to your user `Path`, and updates the current PowerShell session. Open a new terminal to refresh other sessions.
-
-The launcher first looks for a compatible Python in Snug's `python\` directory, recorded runtime state, `PATH`, or the `py` launcher. It excludes Windows Store execution aliases. If no compatible interpreter is found, it downloads the embedded runtime described in [Runtime management](runtime.md). Managed dependencies are unpacked into application-owned directories without installing pip into that runtime.
-
-On ARM64 Windows, the installer still selects x64 Python and x64 DLLs; it has no native ARM64 artifact set. It can work only where the operating system supports running those x64 components. An existing ARM64 Python does not satisfy the managed launcher's platform check. ARM64 Windows is not covered by the repository's CI matrix.
-
 ## Source installation and pip extras
 
-Clone the repository, create an environment, and install from its root. On macOS/Linux:
+Clone `main`, create an environment, and install from its root:
 
 ```bash
 git clone https://github.com/yklucz/snug.git
@@ -78,15 +64,7 @@ python -m pip install '.[all]'
 snug --version
 ```
 
-On Windows, after cloning and entering the checkout:
-
-```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install '.[all]'
-.\.venv\Scripts\snug.exe --version
-```
-
-Using the environment's executable directly avoids relying on activation or `PATH`. You can also run `python snug.py` from a source checkout. Source/pip entry points do not invoke the managed launcher or automatically repair dependencies.
+You can also run `python snug.py` from a source checkout. Source/pip entry points use their chosen environment and do not invoke the managed launcher or automatically repair dependencies.
 
 Select an extra instead of `all` if fewer backends are needed:
 
@@ -148,23 +126,10 @@ python -m pip install '.[extended]'
 
 Package references: [Ubuntu](https://packages.ubuntu.com/noble-updates/libarchive-dev), [Debian](https://packages.debian.org/stable/libarchive-dev), [Fedora](https://packages.fedoraproject.org/pkgs/libarchive/libarchive/), and [Arch](https://archlinux.org/packages/core/x86_64/libarchive/).
 
-### Windows DLL setup
-
-For a source installation, provide a libarchive DLL and all of its dependent DLLs matching your Python architecture. Set `LIBARCHIVE` to the full library filename, and put its directory on `PATH` before running Python:
-
-```powershell
-$env:LIBARCHIVE = 'C:\tools\libarchive\libarchive-13.dll'
-$env:Path = 'C:\tools\libarchive;' + $env:Path
-.\.venv\Scripts\python.exe -m pip install '.[extended]'
-.\.venv\Scripts\snug.exe info archive.rar
-```
-
-Replace the example directory with your actual DLL location. The filename may differ between builds. Snug also registers the directory containing an explicit `LIBARCHIVE` with Python's Windows DLL search API. Setting only the library filename does not supply missing dependent DLLs.
-
 ## Repair, reinstall, and offline use
 
-Managed launchers check both optional backends at startup, including for native-format commands. Missing or unusable dependencies trigger repair, which needs a working internet connection and, on macOS/Linux, a working Homebrew installation. A successful startup check uses local files and does not need a network connection.
+Managed launchers check both optional backends at startup, including for native-format commands. Missing or unusable dependencies trigger repair, which needs a working internet connection and, on macOS/Linux, a working Homebrew installation. A successful dependency startup check uses local files and does not need a network connection. The CLI may make a best-effort periodic release check; archive operations continue offline. See [Updates](updates.md) to disable checks or check explicitly.
 
-Rerun the appropriate installation command above to reinstall application files. Installers validate a staged copy before replacing an existing installation and restore the previous copy if the final startup check fails. This differs from dependency repair, which repairs the installed runtime in place.
+Use `snug update` for supported installer-managed updates, or rerun the installation command above to reinstall application files. See [Updates](updates.md) for installation ownership and release-asset requirements. Installers validate a staged copy before replacing an existing installation and restore the previous copy if the final startup check fails. This differs from dependency repair, which repairs the installed runtime in place.
 
 See [Runtime management](runtime.md) for checks and integrity boundaries, or [Troubleshooting](troubleshooting.md) for failed repairs and command discovery.

@@ -1,21 +1,13 @@
 # Snug
 
-A lightweight Python CLI archive manager.
+A lightweight Python CLI archive manager for macOS and Linux, with explicit commands and an interactive terminal interface.
 
-Works on macOS, Linux, and Windows.
+Windows development is maintained separately on the [`windows` branch](https://github.com/yklucz/snug/tree/windows).
 
 ## Install
 
-### macOS / Linux
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yklucz/snug/main/install.sh | bash
-```
-
-### Windows
-
-```powershell
-irm https://raw.githubusercontent.com/yklucz/snug/main/install.ps1 | iex
 ```
 
 ## Usage
@@ -27,7 +19,11 @@ snug create backup.7z folder/
 snug extract archive.rar -C output/
 snug list backup.7z
 snug info backup.7z
+snug update --check
+snug update
 ```
+
+Run `snug` to open the terminal menu and file picker. Archive commands require their full names; paths are never interpreted as implicit commands.
 
 ## Supported formats
 
@@ -44,6 +40,7 @@ See [Supported formats](docs/supported-formats.md) for creation support, backend
 - [Security](docs/security.md)
 - [Development](docs/development.md)
 - [Runtime management](docs/runtime.md)
+- [Updates](docs/updates.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
 For contributions, see [CONTRIBUTING.md](CONTRIBUTING.md). For vulnerability reports, see [SECURITY.md](SECURITY.md).

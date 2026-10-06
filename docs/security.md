@@ -46,6 +46,8 @@ Extraction writes directly into the destination. A decoding or safety failure ca
 
 Third-party backends must not use unrestricted disk extraction, because that would bypass Snug's path, link, overwrite, and metadata policy. libarchive supplies entry blocks; py7zr receives Snug-controlled writers. Managed dependency downloads use separate verified staging; see [Runtime management](runtime.md#integrity-and-cleanup) for the trust boundary.
 
+CLI application updates use the official GitHub stable-release metadata and source asset, require its GitHub SHA256 digest, restrict HTTPS download hosts, and validate bounded regular-file release contents before offline staging checks and replacement. These are integrity and installation-preservation controls, not an independent publisher signature. Only installer-owned macOS/Linux copies can update themselves; source and pip installations are refused. See [Updates](updates.md) for ownership, privacy, rollback, and interruption limits.
+
 ## Assumptions and known limitations
 
 - Use a destination controlled by the current user. Another process that can change files, parent directories, links, or the archive during the operation can race path-based checks. Most native/shared writes do not use a complete descriptor-relative, race-proof filesystem API.

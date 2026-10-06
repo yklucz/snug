@@ -2,9 +2,11 @@
 
 [← Back to README](../README.md)
 
+This guide covers macOS/Linux `main`. Windows setup and repair are documented on the [`windows` branch](https://github.com/yklucz/snug/blob/windows/docs/troubleshooting.md).
+
 First distinguish a managed launcher from a source/pip command. Managed errors begin with `Snug dependency error:` and concern startup checks or repair. Source CLI errors generally begin with `error:`. See [Installation](installation.md) for setup and [Runtime management](runtime.md) for repair behavior.
 
-## `snug: command not found` and Windows PATH
+## `snug: command not found`
 
 On macOS/Linux, the default launcher is `~/.local/bin/snug`. Check it directly, then add its directory to your shell profile:
 
@@ -15,15 +17,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Use the actual prefix if you set `SNUG_PREFIX`. Open a new terminal after editing the profile.
 
-On Windows, run the installed command directly and refresh the current session's path if necessary:
-
-```powershell
-& "$env:LOCALAPPDATA\Snug\bin\snug.cmd" --version
-$env:Path += ";$env:LOCALAPPDATA\Snug\bin"
-snug --version
-```
-
-The installer persists this path in the user environment, but already open terminals retain their previous path. For pip installations, activate the correct environment or run `.venv/bin/snug` on Unix and `.\.venv\Scripts\snug.exe` on Windows. `python snug.py --version` also works from a source checkout.
+For pip installations, activate the correct environment or run `.venv/bin/snug` directly. `python snug.py --version` also works from a source checkout.
 
 ## Unsupported Python
 
@@ -35,8 +29,6 @@ python -m pip --version
 ```
 
 Create a new environment with a supported Python if necessary; changing a system `python` command does not change an existing virtual environment. Managed checks can report `Python 3.10+ is required`.
-
-The Windows managed launcher requires standard x64 CPython 3.10–3.14, excluding free-threaded builds. Other interpreters may work for source installs but are not accepted by that launcher. It downloads the fallback runtime when no accepted interpreter is found. Repair can report `managed Windows dependencies require CPython 3.10-3.14 x64` or `no locked Windows wheel for Python 3.X` if called with an unsupported interpreter. See [Windows installation](installation.md#windows), including ARM64 behavior.
 
 ## Homebrew missing
 
@@ -51,7 +43,7 @@ snug --version
 
 Use your actual path (`/usr/local/bin/brew` or `/home/linuxbrew/.linuxbrew/bin/brew` are other searched locations). The Unix managed installer requires Homebrew even when system Python/libarchive exists. Choose a source installation to use distribution packages instead.
 
-## libarchive or its DLL cannot load
+## libarchive cannot load
 
 Errors may say `libarchive support requires libarchive-c and the native libarchive library`, `FORMAT support requires the libarchive backend (install snug-archives[extended])`, or, in managed startup, `Snug's native libraries need repair` / `managed installations require libarchive 3.8+`.
 
@@ -68,15 +60,7 @@ export LIBARCHIVE="$(brew --prefix libarchive)/lib/libarchive.dylib"
 snug info archive.rar
 ```
 
-For Windows source installs, ensure the main DLL and all dependent DLLs exist and match Python's architecture:
-
-```powershell
-$env:LIBARCHIVE = 'C:\tools\libarchive\libarchive-13.dll'
-$env:Path = 'C:\tools\libarchive;' + $env:Path
-python -c "import snug_ext; snug_ext.LibarchiveBackend._library(); print('libarchive loaded')"
-```
-
-Use your actual directory and DLL filename. An error naming the main DLL can also mean a dependent DLL is missing. Restart the Python process after changing library discovery settings. For managed installations, reconnect and run Snug again so the launcher can repair; if application scripts or the lock are missing, rerun the installer.
+Restart the Python process after changing library discovery settings. For managed installations, reconnect and run Snug again so the launcher can repair; if application scripts or the lock are missing, rerun the installer.
 
 ## Missing py7zr or unavailable backend
 
@@ -89,7 +73,7 @@ python -m pip install '.[7z]'
 snug info backup.7z
 ```
 
-libarchive provides fallback 7z extraction when py7zr is unavailable, but 7z creation requires py7zr. For managed startup errors such as `py7zr 1.1.3 through 1.x is required` or `py7zr is missing its streaming writer API`, reconnect and rerun the managed command to repair. Installing into an unrelated system Python does not fix Homebrew's selected interpreter or application-owned Windows packages.
+libarchive provides fallback 7z extraction when py7zr is unavailable, but 7z creation requires py7zr. For managed startup errors such as `py7zr 1.1.3 through 1.x is required` or `py7zr is missing its streaming writer API`, reconnect and rerun the managed command to repair. Installing into an unrelated system Python does not fix Homebrew's selected interpreter.
 
 ## Unsupported format or codec
 
@@ -99,9 +83,9 @@ Check the [format matrix and limits](supported-formats.md). Missing backends req
 
 For `standalone compression requires exactly one regular file`, supply one regular file or use a TAR variant for directories/multiple sources. For `thin AR archives reference external files and are unsupported`, obtain a self-contained regular AR archive instead.
 
-## Symlink privileges and unsafe paths
+## Links and unsafe paths
 
-Windows may report an OS privilege error when creating symlinks. Enable the necessary host capability or, if links are unnecessary, skip them:
+If links are unnecessary, skip them:
 
 ```bash
 snug extract backup.7z -C output/ --symlinks skip
@@ -126,13 +110,11 @@ snug extract protected.7z -C output/ --password-file password.txt
 
 ## Repair failures and reinstallation
 
-If Windows reports that `Get-FileHash` or another built-in cmdlet is not recognized, check how PowerShell was launched. A Python/cmd child of PowerShell 7 can pass incompatible module paths to Windows PowerShell 5.1. Current Snug scripts prioritize their own built-in modules; rerun the installer to replace older scripts. The `WindowsPowerShell\v1.0` directory name does not identify the running PowerShell version. Check `$PSVersionTable.PSVersion` in that interpreter instead.
-
-Managed errors include `download checksum mismatch: ...`, `Python download checksum mismatch.`, `Homebrew installation failed. Check your connection, then run snug again.`, and `Dependency repair failed. Check your connection and run snug again.`
+Managed errors include `download checksum mismatch: ...`, `Homebrew installation failed. Check your connection, then run snug again.`, and `Dependency repair failed. Check your connection and run snug again.`
 
 Check internet access and the actual underlying download/package-manager error, then run Snug again. Do not bypass checksum checks. A consistently failing URL or hash needs a reviewed [runtime update](runtime.md#runtime-update-procedure). Startup inventories may also report `Snug's libarchive binding needs repair` or `Snug's Python packages need repair`.
 
-If another repair is running, wait for it to finish before retrying. Unix repair detects dead lock owners; Windows uses a mutex. After an interrupted installation, `An earlier installation backup exists; move it aside before reinstalling.` means a `.previous` directory remains. Inspect and move that backup to a separate location before reinstalling; preserve it if needed for recovery.
+If another repair is running, wait for it to finish before retrying. Unix repair detects dead lock owners. After an interrupted installation, `An earlier installation backup exists; move it aside before reinstalling.` means a `.previous` directory remains. Inspect and move that backup to a separate location before reinstalling; preserve it if needed for recovery.
 
 To reinstall application files, rerun the current installer. On macOS/Linux:
 
@@ -140,16 +122,18 @@ To reinstall application files, rerun the current installer. On macOS/Linux:
 curl -fsSL https://raw.githubusercontent.com/yklucz/snug/main/install.sh | bash
 ```
 
-On Windows:
-
-```powershell
-irm https://raw.githubusercontent.com/yklucz/snug/main/install.ps1 | iex
-```
-
 For a custom Unix prefix, use the same `SNUG_PREFIX` as the original installation. Installers stage and validate the new copy before replacing the old one; they do not repair missing application files solely by launching Snug. For source installations, restore/reinstall the checkout and its chosen extras in the intended environment.
 
 ## Running offline
 
-A managed installation whose startup checks pass does not download anything during ordinary launch. If checks fail offline, reconnect to repair first—even if the requested command uses only ZIP or TAR. Source installations do not run automatic repair and can use already installed backends offline.
+A managed installation whose dependency startup checks pass does not download dependency artifacts during ordinary launch. If checks fail offline, reconnect to repair first—even if the requested command uses only ZIP or TAR. Source installations do not run automatic repair and can use already installed backends offline.
 
 Neither installers nor repair are a general offline bootstrap system. Successful local archive commands do not demonstrate that an unavailable download or a fresh platform install works.
+
+## Update checks and failed updates
+
+An explicit `snug update --check` failure reports a concise error for offline, DNS, timeout, HTTP/rate-limit, or invalid metadata responses. Reconnect and retry; normal archive commands still work with their installed backends. Disable periodic checks with `snug update --disable-checks`, or set `SNUG_NO_UPDATE_CHECK=1` for a single command or offline test environment.
+
+If `snug update` reports that the installation is managed externally, use the method that installed it. Pip environments should be updated with that environment's pip; source checkouts should be updated through their normal Git workflow. Older managed copies can be reinstalled with `install.sh` to record installation ownership. Snug does not overwrite checkouts or infer ownership merely from a nearby runtime file.
+
+A newer tag alone is insufficient for a managed update: the release must publish the expected source asset with a SHA256 digest. Download, digest, staging, or validation failures retain the active application. Replacement failures attempt to restore its saved copy. Resolve the reported cause before retrying; do not bypass verification or delete the current application. After a crash or forced termination, preserve any staged or backup copy until its contents have been inspected. See [Updates](updates.md) for the full release and recovery boundary.
