@@ -27,7 +27,7 @@ all = ["libarchive-c>=5.3,<6", "py7zr>=1.1.3,<2"]
 test = ["pytest>=8,<10"]
 
 [tool.setuptools]
-py-modules = ["snug", "snug_core", "snug_ext"]
+py-modules = ["snug", "snug_core", "snug_ext", "snug_update"]
 include-package-data = false
 
 [tool.pytest.ini_options]
@@ -35,6 +35,6 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.pyright]
-include = ["snug.py", "snug_core.py", "snug_ext.py", "snug_runtime.py"]
+include = ["snug.py", "snug_core.py", "snug_ext.py", "snug_runtime.py", "snug_update.py"]
 pythonVersion = "3.10"
 typeCheckingMode = "standard"

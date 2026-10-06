@@ -2,6 +2,7 @@
 # Installed beside Snug and reused by its launcher for automatic repair.
 set -Eeuo pipefail
 APP_DIR="${1:?Snug application directory is required}"
+export SNUG_MANAGED_ROOT="$APP_DIR"
 shift
 MODE="${1:---run}"
 shift || true
@@ -51,7 +52,9 @@ probe() {
 
 repair() (
   # Serialize installations. A dead owner can leave a directory after power loss.
-  local lock="$APP_DIR/.repair-lock" owner attempts=0 work before after added formula brew_root owned_before=0 owned_after=0
+  local lock="$APP_DIR/.repair-lock" update_lock owner attempts=0 work before after added formula brew_root owned_before=0 owned_after=0
+  update_lock="$(dirname "$APP_DIR")/.$(basename "$APP_DIR").update-lock"
+  [[ ! -e "$update_lock" ]] || die 'An application update is in progress. Try dependency repair again when it finishes.'
   while ! mkdir "$lock" 2>/dev/null; do
     owner="$(cat "$lock/pid" 2>/dev/null || true)"
     if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
@@ -68,6 +71,7 @@ repair() (
   printf '%s\n' "$$" > "$lock/pid"
   work="$(mktemp -d)"
   trap 'rm -rf "$work"; rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true' EXIT
+  [[ ! -e "$update_lock" ]] || die 'An application update is in progress. Try dependency repair again when it finishes.'
   if resolve_runtime && probe; then exit 0; fi
   # Cache only this operation's downloads; never delete an existing Brew cache.
   export HOMEBREW_CACHE="$work/brew-cache"
@@ -116,6 +120,10 @@ repair() (
 )
 
 find_brew
+# Update checks need only the existing Python, even if an optional backend needs repair.
+if [[ "$MODE" == --run && "${1:-}" == update ]] && resolve_runtime; then
+  exec "$SNUG_PYTHON" -B "$APP_DIR/snug.py" "$@"
+fi
 if ! resolve_runtime || ! probe; then repair; fi
 resolve_runtime || die 'Archive dependencies could not be located.'
 if [[ "$MODE" == --prepare ]]; then exit 0; fi

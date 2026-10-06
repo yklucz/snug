@@ -6,21 +6,37 @@ PREFIX="${SNUG_PREFIX:-${HOME}/.local}"
 BIN_DIR="$PREFIX/bin"
 APP_DIR="$PREFIX/share/snug"
 LAUNCHER="$BIN_DIR/snug"
+UPDATE_LOCK="$PREFIX/share/.snug.update-lock"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || die 'curl is required'
-case "$(uname -s)" in Darwin|Linux) ;; *) die 'Use install.ps1 on Windows';; esac
+case "$(uname -s)" in Darwin|Linux) ;; *) die 'Use the Windows installer on the windows branch';; esac
 mkdir -p "$BIN_DIR" "$PREFIX/share"
+mkdir "$UPDATE_LOCK" 2>/dev/null || die 'Another Snug installation or update is in progress. Retry when it finishes.'
+STAGING=""
+NEW_LAUNCHER=""
+cleanup() {
+  [[ -z "$STAGING" ]] || rm -rf "$STAGING"
+  [[ -z "$NEW_LAUNCHER" ]] || rm -f "$NEW_LAUNCHER"
+  rmdir "$UPDATE_LOCK" 2>/dev/null || true
+}
+trap cleanup EXIT
+[[ ! -e "$APP_DIR/.repair-lock" ]] || die 'A Snug dependency repair is in progress. Retry when it finishes.'
 STAGING="$(mktemp -d "$PREFIX/share/.snug-install.XXXXXX")"
 NEW_LAUNCHER="$(mktemp "$BIN_DIR/.snug-launcher.XXXXXX")"
-trap 'rm -rf "$STAGING"; rm -f "$NEW_LAUNCHER"' EXIT
 printf '==> Downloading Snug\n'
-for source in snug.py snug_core.py snug_ext.py snug_runtime.py runtime.sh runtime-lock.json; do
+for source in snug.py snug_core.py snug_ext.py snug_update.py snug_runtime.py runtime.sh runtime-lock.json; do
   curl -fsSL --proto '=https' --proto-redir '=https' --retry 2 "$RAW_BASE/$source" -o "$STAGING/$source"
 done
+if [[ "$RAW_BASE" == https://raw.githubusercontent.com/yklucz/snug/main ]]; then
+  printf '%s\n' '{"schema":1,"kind":"homebrew","branch":"main"}' > "$STAGING/.snug-install.json"
+else
+  printf '%s\n' '{"schema":1,"kind":"custom","branch":"external"}' > "$STAGING/.snug-install.json"
+fi
 # All backends must validate before replacing an existing working installation.
 bash "$STAGING/runtime.sh" "$STAGING" --prepare
 bash "$STAGING/runtime.sh" "$STAGING" --run --version >/dev/null
+[[ ! -e "$APP_DIR/.repair-lock" ]] || die 'A Snug dependency repair is in progress. Retry when it finishes.'
 if [[ -d "$APP_DIR" ]]; then
   [[ ! -e "$APP_DIR.previous" ]] || die 'An earlier installation backup exists; move it aside before reinstalling.'
   mv "$APP_DIR" "$APP_DIR.previous"

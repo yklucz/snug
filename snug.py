@@ -2,7 +2,7 @@
 """Snug — a lightweight Python CLI archive manager with live speed and ETA.
 
 Run without arguments for the existing interactive terminal interface, or use
-create, extract, list and info. Archive I/O and safety live in snug_core;
+create, extract, list, info and update. Archive I/O and safety live in snug_core;
 optional broad-format and 7z implementations live in snug_ext.
 """
 from __future__ import annotations
@@ -20,7 +20,10 @@ import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol, Sequence
+from typing import TYPE_CHECKING, Callable, Protocol, Sequence
+
+if TYPE_CHECKING:
+    from snug_update import AutomaticCheck
 
 from snug_core import (
     ArchiveEngine, ArchiveEntry, ArchiveError, ArchiveFormat, CreateReport,
@@ -1272,6 +1275,12 @@ def _build_parser() -> argparse.ArgumentParser:
     i = sub.add_parser("info", help="show archive summary")
     i.add_argument("archive")
 
+    u = sub.add_parser("update", help="check for releases or update a managed installation")
+    update_action = u.add_mutually_exclusive_group()
+    update_action.add_argument("--check", action="store_true", help="check for a newer stable release")
+    update_action.add_argument("--enable-checks", action="store_true", help="enable daily automatic checks")
+    update_action.add_argument("--disable-checks", action="store_true", help="disable automatic checks")
+
     for command in (c, x, l, i):
         passwords = command.add_mutually_exclusive_group()
         passwords.add_argument("--password", action="store_true",
@@ -1426,13 +1435,66 @@ def _cmd_info(args, engine: ArchiveEngine) -> None:
         print(f"{key:<{width}} : {_safe(value)}")
 
 
+def _cmd_update(args) -> int:
+    from snug_update import UpdateError, check_update, perform_update, set_checks
+    try:
+        if args.enable_checks or args.disable_checks:
+            enabled = args.enable_checks
+            set_checks(enabled)
+            print(f"Automatic update checks {'enabled' if enabled else 'disabled'}.")
+        elif args.check:
+            result = check_update(__version__)
+            if result.available:
+                print(f"Current version: {result.current_version}\nLatest version:  {result.latest_version}")
+                print("\nUpdate available.\nRun `snug update` to install it.")
+            else:
+                print(f"Snug {__version__} is up to date.")
+        else:
+            print(perform_update(__version__))
+    except UpdateError as exc:
+        print(f"error: {_safe(exc)}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        return 130
+    return 0
+
+
+def _start_update_check() -> AutomaticCheck | None:
+    try:
+        from snug_update import start_automatic_check
+        return start_automatic_check(__version__)
+    except Exception:
+        # Optional discovery cannot change an archive operation's exit status.
+        return None
+
+
+def _update_notice(handle: AutomaticCheck | None) -> None:
+    try:
+        if sys.stderr.isatty():
+            from snug_update import automatic_notice
+            notice = automatic_notice(handle)
+            if notice:
+                print(notice, file=sys.stderr)
+    except Exception:
+        return
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:]) if argv is None else list(argv)
 
     if not argv:
-        return _launch_interactive()
+        handle = _start_update_check() if sys.stdin.isatty() and sys.stdout.isatty() else None
+        code = _launch_interactive()
+        if code == 0:
+            _update_notice(handle)
+        return code
 
     args = _build_parser().parse_args(argv)
+    if args.command == "update":
+        return _cmd_update(args)
+
+    handle = _start_update_check()
     engine = ArchiveEngine()
 
     dispatch = {
@@ -1458,6 +1520,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\ninterrupted", file=sys.stderr)
         return 130
 
+    if args.command in {"create", "extract"} and not args.quiet:
+        _update_notice(handle)
     return 0
 
 

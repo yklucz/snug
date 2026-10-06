@@ -14,6 +14,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "snug.py"
 
 def run_cli(*args, cwd=None):
     return subprocess.run([sys.executable, str(SCRIPT), *map(str, args)], cwd=cwd,
+                          env=dict(os.environ, SNUG_NO_UPDATE_CHECK="1"),
                           capture_output=True, text=True, timeout=45)
 
 

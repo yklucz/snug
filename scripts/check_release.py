@@ -9,7 +9,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULES = {"snug.py", "snug_core.py", "snug_ext.py"}
+MODULES = {"snug.py", "snug_core.py", "snug_ext.py", "snug_update.py"}
 SOURCE_FILES = {
     *MODULES, "snug_runtime.py", "pyproject.toml", "MANIFEST.in",
     "README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md",
@@ -36,7 +36,7 @@ def check_local_paths(names: set[str]) -> None:
                 f"Unsafe release path: {name}")
         require(not (set(path.parts) & LOCAL_DIRS), f"Local directory in release: {name}")
         require(path.name not in {
-            "runtime.json", ".snug-files.json", ".coverage", ".DS_Store", "Thumbs.db", ".pypirc",
+            "runtime.json", "update.json", ".snug-install.json", ".snug-files.json", ".coverage", ".DS_Store", "Thumbs.db", ".pypirc",
         },
                 f"Generated state in release: {name}")
         require(not path.name.startswith((".env", ".coverage.")),
@@ -99,7 +99,7 @@ def check_wheel(path: Path) -> None:
         require(len(entry_points) == 1, "Wheel needs console-script metadata")
         require("snug = snug:main" in archive.read(entry_points[0]).decode("utf-8"),
                 "Wheel has lost the snug console entry point")
-    print("Wheel: three CLI modules, package metadata, and the snug entry point verified")
+    print(f"Wheel: {len(MODULES)} CLI modules, package metadata, and the snug entry point verified")
 
 
 def main() -> int:

@@ -21,6 +21,7 @@ prune packages
 prune native
 prune python
 global-exclude __pycache__ *.py[cod] .snug-files.json runtime.json
+global-exclude .snug-install.json update.json
 global-exclude .env .env.* *.pem *.key *.p12 *.pfx *.part *.tmp *.log
 global-exclude .DS_Store Thumbs.db .envrc .pypirc .coverage .coverage.*
 global-exclude *.so *.dylib *.dll *.whl
