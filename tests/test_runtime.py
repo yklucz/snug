@@ -220,7 +220,7 @@ def brew_app(tmp_path):
     pytest.importorskip('py7zr')
     app = tmp_path / 'app with spaces'
     app.mkdir()
-    for name in ['snug.py', 'snug_core.py', 'snug_ext.py', 'snug_runtime.py', 'runtime.sh', 'runtime-lock.json']:
+    for name in ['snug.py', 'snug_core.py', 'snug_ext.py', 'snug_update.py', 'snug_runtime.py', 'runtime.sh', 'runtime-lock.json']:
         shutil.copyfile(ROOT / name, app / name)
     shutil.copytree(Path(libarchive.__file__).parent, app / 'vendor/libarchive', ignore=shutil.ignore_patterns('__pycache__'))
     runtime.record_files(app / 'vendor')
@@ -274,7 +274,7 @@ case "$1" in
 esac
 ''')
     brew.chmod(0o755)
-    env = dict(PATH=os.environ['PATH'], SNUG_BREW=str(brew), SNUG_TEST_BREW_ROOT=str(brew_root),
+    env = dict(PATH=os.environ['PATH'], SNUG_NO_UPDATE_CHECK='1', SNUG_BREW=str(brew), SNUG_TEST_BREW_ROOT=str(brew_root),
                SNUG_TEST_LOG=str(log), SNUG_TEST_BROKEN=str(tmp_path / 'broken'),
                SNUG_TEST_PYTHON=sys.executable)
     return app, env, state, log
@@ -337,6 +337,47 @@ cp "$SNUG_TEST_SOURCE/${url##*/}" "$target"
     assert not list((prefix / 'bin').glob('.snug-launcher*'))
 
 
+@pytest.mark.parametrize('custom_source', [False, True])
+def test_installer_records_ownership_and_runs_offline(brew_app, tmp_path, custom_source):
+    app, env, state, log = brew_app
+    prefix = tmp_path / "installed user's Snug 📦"
+    commands = tmp_path / 'commands'
+    commands.mkdir()
+    curl = commands / 'curl'
+    # Supply application files and the already verified binding without network
+    # access, while exercising the real installer, runtime, and final launcher.
+    curl.write_text('''#!/usr/bin/env bash
+set -eu
+url="${@: -3:1}"
+target="${@: -1}"
+cp "$SNUG_TEST_SOURCE/${url##*/}" "$target"
+if [[ "${url##*/}" == runtime-lock.json ]]; then
+  cp -R "$SNUG_TEST_VENDOR" "$(dirname "$target")/vendor"
+fi
+''')
+    curl.chmod(0o755)
+    env = dict(env, SNUG_PREFIX=str(prefix), SNUG_TEST_SOURCE=str(ROOT),
+               SNUG_TEST_VENDOR=str(app / 'vendor'),
+               PATH=str(commands) + os.pathsep + env['PATH'])
+    if custom_source:
+        env['SNUG_RAW_BASE'] = 'https://example.test/snug'
+    result = subprocess.run(['bash', str(ROOT / 'install.sh')], env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    installed = prefix / 'share/snug'
+    marker = json.loads((installed / '.snug-install.json').read_text())
+    assert marker == {'schema': 1, 'kind': 'custom' if custom_source else 'homebrew',
+                      'branch': 'external' if custom_source else 'main'}
+    checked = subprocess.run([str(prefix / 'bin/snug'), '--version'], env=env,
+                             capture_output=True, text=True, timeout=30)
+    assert checked.returncode == 0, checked.stderr
+    assert checked.stdout.strip() == 'snug 1.8.0'
+    assert not log.exists()
+    assert not (prefix / 'share/.snug.update-lock').exists()
+    assert not list((prefix / 'share').glob('.snug-install*'))
+    assert not list((prefix / 'bin').glob('.snug-launcher*'))
+
+
 def test_unix_installer_rejects_insecure_download_before_installing(tmp_path):
     if os.name == 'nt' or not shutil.which('curl'):
         pytest.skip('requires Unix curl')
@@ -349,6 +390,59 @@ def test_unix_installer_rejects_insecure_download_before_installing(tmp_path):
     assert not (prefix / 'share/snug').exists()
     assert not list((prefix / 'share').glob('.snug-install*'))
     assert not list((prefix / 'bin').glob('.snug-launcher*'))
+    assert not (prefix / 'share/.snug.update-lock').exists()
+
+
+def test_unix_installer_preserves_existing_application_update_lock(tmp_path):
+    if os.name == 'nt':
+        pytest.skip('requires Unix installer')
+    prefix = tmp_path / 'installation'
+    app = prefix / 'share/snug'
+    app.mkdir(parents=True)
+    (app / 'current').write_text('working installation')
+    lock = prefix / 'share/.snug.update-lock'
+    lock.mkdir()
+    result = subprocess.run(['bash', str(ROOT / 'install.sh')],
+                            env=dict(os.environ, SNUG_PREFIX=str(prefix)),
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    assert 'in progress' in result.stderr
+    assert (app / 'current').read_text() == 'working installation'
+    assert lock.is_dir()
+    assert not list((prefix / 'share').glob('.snug-install*'))
+
+
+def test_dependency_repair_refuses_application_update_lock(brew_app):
+    app, env, state, log = brew_app
+    Path(env['SNUG_TEST_BROKEN']).touch()
+    lock = app.parent / f'.{app.name}.update-lock'
+    lock.mkdir()
+    result = launch(app, env, 'list', 'missing.zip')
+    assert result.returncode != 0
+    assert 'application update is in progress' in result.stderr.lower()
+    assert lock.is_dir()
+    assert not (app / '.repair-lock').exists()
+    assert not log.exists()
+
+
+def test_unix_installer_preserves_active_dependency_repair(tmp_path):
+    if os.name == 'nt':
+        pytest.skip('requires Unix installer')
+    prefix = tmp_path / 'installation'
+    app = prefix / 'share/snug'
+    app.mkdir(parents=True)
+    (app / 'current').write_text('working installation')
+    repair = app / '.repair-lock'
+    repair.mkdir()
+    result = subprocess.run(['bash', str(ROOT / 'install.sh')],
+                            env=dict(os.environ, SNUG_PREFIX=str(prefix)),
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    assert 'dependency repair is in progress' in result.stderr
+    assert (app / 'current').read_text() == 'working installation'
+    assert repair.is_dir()
+    assert not (prefix / 'share/.snug.update-lock').exists()
+    assert not list((prefix / 'share').glob('.snug-install*'))
 
 
 def test_brew_dependency_repair_and_offline_failure(brew_app):

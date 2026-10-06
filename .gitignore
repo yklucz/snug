@@ -34,6 +34,8 @@ __pypackages__/
 
 # Managed runtime downloads, state, and staging directories at the app root
 /runtime.json
+/.snug-install.json
+/update.json
 /vendor/
 /packages/
 /native/
