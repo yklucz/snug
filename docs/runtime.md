@@ -63,6 +63,8 @@ Repair is serialized with an application-directory lock. It tries installation, 
 
 The embedded runtime is configured with a `python314._pth` file and `import site`. It does not include an installed pip toolchain. Wheels are unpacked into `packages/`; the binding lives in `vendor/`. Wheel tests, self-tests, bytecode caches, console scripts, and build headers are omitted. Package metadata and licenses remain.
 
+The PowerShell installer and launcher put their interpreter's built-in module directory first in `PSModulePath`. This keeps cmdlets such as `Get-FileHash` and `Expand-Archive` available when a Python or cmd process passes inherited PowerShell 7 module paths to Windows PowerShell 5.1. Other inherited module directories remain available after the built-ins.
+
 Native packages contribute only the declared regular-file DLL and license members. The locked DLL members all begin with `ucrt64/bin/`; they are flattened into `native/`:
 
 | Native package/version | DLL member basename |

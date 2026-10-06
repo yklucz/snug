@@ -126,6 +126,8 @@ snug extract protected.7z -C output/ --password-file password.txt
 
 ## Repair failures and reinstallation
 
+If Windows reports that `Get-FileHash` or another built-in cmdlet is not recognized, check how PowerShell was launched. A Python/cmd child of PowerShell 7 can pass incompatible module paths to Windows PowerShell 5.1. Current Snug scripts prioritize their own built-in modules; rerun the installer to replace older scripts. The `WindowsPowerShell\v1.0` directory name does not identify the running PowerShell version. Check `$PSVersionTable.PSVersion` in that interpreter instead.
+
 Managed errors include `download checksum mismatch: ...`, `Python download checksum mismatch.`, `Homebrew installation failed. Check your connection, then run snug again.`, and `Dependency repair failed. Check your connection and run snug again.`
 
 Check internet access and the actual underlying download/package-manager error, then run Snug again. Do not bypass checksum checks. A consistently failing URL or hash needs a reviewed [runtime update](runtime.md#runtime-update-procedure). Startup inventories may also report `Snug's libarchive binding needs repair` or `Snug's Python packages need repair`.

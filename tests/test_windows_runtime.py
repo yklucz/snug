@@ -20,6 +20,9 @@ def test_windows_bootstrap_password_workflow_and_deleted_dll_repair(tmp_path):
     powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     env = dict(os.environ)
     env["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32")
+    # Reproduce an intermediate Python process inheriting a module search
+    # path without Windows PowerShell's built-ins (as with PowerShell 7).
+    env["PSMODULEPATH"] = str(tmp_path / "PowerShell7Modules")
     for key in ("LIBARCHIVE", "SNUG_LIBRARY", "SNUG_PACKAGES"):
         env.pop(key, None)
     def run(*args):

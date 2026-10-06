@@ -319,14 +319,19 @@ class LibarchiveBackend:
         except (FileNotFoundError, PermissionError):
             report.skipped.append(name)
             return
-        attributes = {"permission": stat.S_IMODE(st.st_mode), "mtime": st.st_mtime}
+        # libarchive-c's float setter swaps seconds/fractions, overflowing a
+        # Windows 32-bit C long. Its tuple setter preserves the actual time.
+        attributes = {"permission": stat.S_IMODE(st.st_mode),
+                      "mtime": divmod(st.st_mtime_ns, 1_000_000_000)}
         if stat.S_ISLNK(st.st_mode):
             if symlinks == "skip":
                 report.skipped.append(name)
                 return
             # libarchive-c's generic linkpath setter can set the hardlink field
             # on a synthetic symlink. Its disk reader preserves real metadata.
-            writer.add_files(str(source), pathname=name, recursive=False,
+            # libarchive's Windows disk reader returns forward-slash paths;
+            # libarchive-c compares them with this source path before renaming.
+            writer.add_files(source.as_posix(), pathname=name, recursive=False,
                              symlink_mode="physical")
             report.symlinks += 1
         elif stat.S_ISDIR(st.st_mode):

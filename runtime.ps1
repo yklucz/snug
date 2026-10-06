@@ -3,6 +3,10 @@ param(
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$SnugArguments
 )
 $ErrorActionPreference = 'Stop'
+# A Python/cmd child of PowerShell 7 can inherit incompatible module paths.
+# Keep this interpreter's built-in cmdlets ahead of inherited modules.
+$BuiltinModules = [IO.Path]::Combine($PSHOME, 'Modules')
+$env:PSModulePath = $BuiltinModules + [IO.Path]::PathSeparator + $env:PSModulePath
 $Root = $PSScriptRoot
 
 function Quote-NativeArgument([string]$Value) {

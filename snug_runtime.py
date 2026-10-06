@@ -138,9 +138,11 @@ def wheel_member(name: str) -> Path | None:
 def unpack_wheel(archive: Path, destination: Path) -> None:
     with zipfile.ZipFile(archive) as wheel:
         for entry in wheel.infolist():
+            # ZipInfo.filename normalizes backslashes on Windows. Validate
+            # the original header name before normalization or directory skips.
+            relative = wheel_member(entry.orig_filename)
             if entry.is_dir():
                 continue
-            relative = wheel_member(entry.filename)
             if relative is None:
                 continue
             target = destination / relative

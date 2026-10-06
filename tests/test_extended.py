@@ -1,3 +1,5 @@
+import ctypes
+from contextlib import contextmanager
 import hashlib
 import io
 import os
@@ -156,6 +158,27 @@ def test_libarchive_create_round_trip(engine, tmp_path, libarchive_backend, suff
     assert (tmp_path / "output/hello.txt").read_bytes() == source.read_bytes()
 
 
+@pytest.mark.parametrize("suffix", ["cpio", "ar"])
+def test_libarchive_timestamps_with_windows_width_nanoseconds(
+    engine, tmp_path, libarchive_backend, monkeypatch, suffix
+):
+    source = tmp_path / "hello.txt"
+    source.write_bytes(b"created by Snug\n")
+    timestamp_ns = 1700000002123456789
+    os.utime(source, ns=(timestamp_ns, timestamp_ns))
+    # Windows C long is 32-bit. Reproduce the libarchive-c float setter's
+    # nanosecond overflow at the actual ctypes boundary on other hosts too.
+    setter = libarchive_backend.ffi.entry_set_mtime
+    monkeypatch.setattr(setter, "argtypes", [*setter.argtypes[:2], ctypes.c_int32])
+    archive = tmp_path / f"sample.{suffix}"
+    engine.create(archive, [source])
+    entries = engine.list_entries(archive)
+    assert [entry.name for entry in entries] == ["hello.txt"]
+    assert int(entries[0].mtime) == timestamp_ns // 1_000_000_000
+    engine.extract(archive, tmp_path / "output")
+    assert (tmp_path / "output/hello.txt").read_bytes() == source.read_bytes()
+
+
 def test_ar_deb_container_extraction(engine, tmp_path, libarchive_backend):
     archive = tmp_path / "sample.deb"
     # DEB is an AR container. This fixture makes no claim to package install or
@@ -268,22 +291,70 @@ def test_cpio_safe_symlink_round_trip(engine, tmp_path, libarchive_backend):
     assert (dest / "link").read_bytes() == b"safe cpio link"
 
 
+def test_cpio_symlink_with_windows_source_separators(
+    engine, tmp_path, libarchive_backend, monkeypatch
+):
+    import libarchive.write
+
+    source = tmp_path / "source"
+    source.mkdir()
+    regular = source / "hello.txt"
+    regular.write_bytes(b"safe cpio link")
+    link = source / "link"
+    try:
+        link.symlink_to("hello.txt")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"platform cannot create symlinks: {exc}")
+
+    class WindowsSource:
+        def __str__(self):
+            return str(link).replace("/", "\\")
+
+        def as_posix(self):
+            return link.as_posix()
+
+        def lstat(self):
+            return link.lstat()
+
+    read_disk = libarchive.write.new_archive_read_disk
+
+    @contextmanager
+    def normalized_disk_path(path, *args, **kwargs):
+        # The Windows disk reader accepts backslashes but returns forward
+        # slashes. Exercise libarchive-c's pathname comparison unchanged.
+        with read_disk(path.replace("\\", "/"), *args, **kwargs) as reader:
+            yield reader
+
+    monkeypatch.setattr(libarchive.write, "new_archive_read_disk", normalized_disk_path)
+    archive = tmp_path / "sample.cpio"
+    engine.create(archive, [source], precollected=(
+        [(regular, "hello.txt"), (WindowsSource(), "link")], regular.stat().st_size
+    ))
+    dest = tmp_path / "output"
+    engine.extract(archive, dest)
+    assert (dest / "link").is_symlink()
+    assert (dest / "link").read_bytes() == regular.read_bytes()
+
+
 def test_sevenzip_escaping_symlink(engine, tmp_path, py7zr_backend):
-    outside = tmp_path / "outside"
-    outside.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"keep outside content")
     source = tmp_path / "source/escape"
     source.parent.mkdir()
     try:
-        source.symlink_to("../outside")
+        # Use a file link: Windows directory reparse points are classified as
+        # junctions by py7zr and exercise a separate unsupported-entry policy.
+        source.symlink_to("../outside.txt", target_is_directory=False)
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"platform cannot create symlinks: {exc}")
     archive = tmp_path / "bad.7z"
+    assert source.is_file()
     with py7zr_backend.SevenZipFile(archive, "w") as handle:
         handle.write(source, "escape")
     assert engine.list_entries(archive)[0].is_symlink
     with pytest.raises(snug.UnsafeArchiveError):
         engine.extract(archive, tmp_path / "output")
-    assert list(outside.iterdir()) == []
+    assert outside.read_bytes() == b"keep outside content"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_NOFILE is a Unix-only diagnostic")

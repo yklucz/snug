@@ -1,4 +1,7 @@
 $ErrorActionPreference = 'Stop'
+# Prefer built-in modules when invoked through a process from another PowerShell.
+$BuiltinModules = [IO.Path]::Combine($PSHOME, 'Modules')
+$env:PSModulePath = $BuiltinModules + [IO.Path]::PathSeparator + $env:PSModulePath
 $RawBase = if ($env:SNUG_RAW_BASE) { $env:SNUG_RAW_BASE } else { 'https://raw.githubusercontent.com/yklucz/snug/main' }
 $InstallRoot = Join-Path $env:LOCALAPPDATA 'Snug'
 $Staging = Join-Path $env:LOCALAPPDATA ('.snug-install-' + [Guid]::NewGuid().ToString('N'))

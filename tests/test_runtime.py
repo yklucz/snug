@@ -22,7 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
 def make_wheel(path, files):
     with zipfile.ZipFile(path, 'w') as archive:
         for name, content in files.items():
-            archive.writestr(name, content)
+            # ZipInfo normalizes separators on Windows. Preserve the supplied
+            # header name so adversarial fixtures really contain unsafe paths.
+            entry = zipfile.ZipInfo(name)
+            entry.filename = name
+            archive.writestr(entry, content)
 
 
 def test_binding_repair_is_verified_and_reused(tmp_path, monkeypatch):
@@ -90,6 +94,20 @@ def test_runtime_wheels_cannot_escape_destination(tmp_path, unsafe):
     with pytest.raises(RuntimeError, match='unsafe path'):
         runtime.unpack_wheel(wheel, tmp_path / 'output')
     assert not (tmp_path / 'outside').exists()
+
+
+def test_runtime_wheel_rejects_backslash_after_zip_name_normalization(tmp_path, monkeypatch):
+    wheel = tmp_path / 'unsafe.whl'
+    make_wheel(wheel, {'a\\b': 'bad'})
+    monkeypatch.setattr(zipfile.os, 'sep', '\\')
+    monkeypatch.setattr(zipfile.os, 'altsep', '/')
+    with zipfile.ZipFile(wheel) as archive:
+        entry = archive.infolist()[0]
+        assert entry.filename == 'a/b'
+        assert entry.orig_filename == 'a\\b'
+    with pytest.raises(RuntimeError, match='unsafe path'):
+        runtime.unpack_wheel(wheel, tmp_path / 'output')
+    assert not (tmp_path / 'output').exists()
 
 
 def test_wheels_keep_runtime_and_licenses_without_test_tools(tmp_path):
