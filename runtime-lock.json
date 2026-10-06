@@ -1,0 +1,325 @@
+{
+  "schema": 1,
+  "binding": {
+    "filename": "libarchive_c-5.3-py3-none-any.whl",
+    "url": "https://files.pythonhosted.org/packages/88/3f/ff00c588ebd7eae46a9d6223389f5ae28a3af4b6d975c0f2a6d86b1342b9/libarchive_c-5.3-py3-none-any.whl",
+    "sha256": "651550a6ec39266b78f81414140a1e04776c935e72dfc70f1d7c8e0a3672ffba"
+  },
+  "windows": {
+    "python": {
+      "version": "3.14.8",
+      "url": "https://www.python.org/ftp/python/3.14.8/python-3.14.8-embed-amd64.zip",
+      "sha256": "a93abe456ab01bd96d7a085b3cdb6566b3063f4241360d114142fbdb07f0a310"
+    },
+    "packages": {
+      "py7zr": {
+        "version": "1.1.3",
+        "wheels": [
+          {
+            "filename": "py7zr-1.1.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/88/40/dc7f804abd0ea167ea8d4d9b3f5455321aaf671d040fcef647e9e952e714/py7zr-1.1.3-py3-none-any.whl",
+            "sha256": "17934a35089e026dec6c72ee275d9b841e646881ef822d618e805c3006661d9a"
+          }
+        ]
+      },
+      "brotli": {
+        "version": "1.2.0",
+        "wheels": [
+          {
+            "filename": "brotli-1.2.0-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/ac/39/70981d9f47705e3c2b95c0847dfa3e7a37aa3b7c6030aedc4873081ed005/brotli-1.2.0-cp310-cp310-win_amd64.whl",
+            "sha256": "ef87b8ab2704da227e83a246356a2b179ef826f550f794b2c52cddb4efbd0196"
+          },
+          {
+            "filename": "brotli-1.2.0-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/02/8b/ecb5761b989629a4758c394b9301607a5880de61ee2ee5fe104b87149ebc/brotli-1.2.0-cp311-cp311-win_amd64.whl",
+            "sha256": "022426c9e99fd65d9475dce5c195526f04bb8be8907607e27e747893f6ee3e24"
+          },
+          {
+            "filename": "brotli-1.2.0-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/1c/4e/bc1dcac9498859d5e353c9b153627a3752868a9d5f05ce8dedd81a2354ab/brotli-1.2.0-cp312-cp312-win_amd64.whl",
+            "sha256": "b35c13ce241abdd44cb8ca70683f20c0c079728a36a996297adb5334adfc1c44"
+          },
+          {
+            "filename": "brotli-1.2.0-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/ff/91/e739587be970a113b37b821eae8097aac5a48e5f0eca438c22e4c7dd8648/brotli-1.2.0-cp313-cp313-win_amd64.whl",
+            "sha256": "b63daa43d82f0cdabf98dee215b375b4058cce72871fd07934f179885aad16e8"
+          },
+          {
+            "filename": "brotli-1.2.0-cp314-cp314-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/f5/10/56978295c14794b2c12007b07f3e41ba26acda9257457d7085b0bb3bb90c/brotli-1.2.0-cp314-cp314-win_amd64.whl",
+            "sha256": "e7c0af964e0b4e3412a0ebf341ea26ec767fa0b4cf81abb5e897c9338b5ad6a3"
+          }
+        ]
+      },
+      "inflate64": {
+        "version": "1.0.4",
+        "wheels": [
+          {
+            "filename": "inflate64-1.0.4-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/a3/59/cef1b3505dc33d8cb9d115481923dec1de1372d29ac278622feecf9c03a1/inflate64-1.0.4-cp310-cp310-win_amd64.whl",
+            "sha256": "950dd7fe53474df5f4699b8f099980027e812d55fd82d8e167d599822c3d27d6"
+          },
+          {
+            "filename": "inflate64-1.0.4-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/8c/32/be5cac018960157d33d61278377d590d5cc34922222cb0c4dc3284ce6eeb/inflate64-1.0.4-cp311-cp311-win_amd64.whl",
+            "sha256": "7056148548c1f25dcb38251f88c19b4635a5f32af4c7bad00621c85509e3d8c0"
+          },
+          {
+            "filename": "inflate64-1.0.4-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/33/c4/c0de4e9bdf12e449360b710e9ab5b5248804610f382b538773cbd07b72bb/inflate64-1.0.4-cp312-cp312-win_amd64.whl",
+            "sha256": "2c6befdf83d088a6e0d10d0873a9d4bfde2ce00ad7a52c8189cf303306f98030"
+          },
+          {
+            "filename": "inflate64-1.0.4-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/e7/4f/5784ee1eb8260f2310e24ef2883f1f494f9332bcfde4ed14ee780372149e/inflate64-1.0.4-cp313-cp313-win_amd64.whl",
+            "sha256": "3983f53b590ff7d0ba243f664ce852aca882482f30f7a8eab33e10d769336d0c"
+          },
+          {
+            "filename": "inflate64-1.0.4-cp314-cp314-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/dd/51/f2972df8cceecc9bf3afa3353d517ffc7125285198c844588e9aaf98f5d0/inflate64-1.0.4-cp314-cp314-win_amd64.whl",
+            "sha256": "fb2fdd63ef3933b67af98b3f2ee2f57e7787278041d7ba4821382fedd729b68a"
+          }
+        ]
+      },
+      "multivolumefile": {
+        "version": "0.2.3",
+        "wheels": [
+          {
+            "filename": "multivolumefile-0.2.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/22/31/ec5f46fd4c83185b806aa9c736e228cb780f13990a9cf4da0beb70025fcc/multivolumefile-0.2.3-py3-none-any.whl",
+            "sha256": "237f4353b60af1703087cf7725755a1f6fcaeeea48421e1896940cd1c920d678"
+          }
+        ]
+      },
+      "psutil": {
+        "version": "7.2.2",
+        "wheels": [
+          {
+            "filename": "psutil-7.2.2-cp37-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/b4/90/e2159492b5426be0c1fef7acba807a03511f97c5f86b3caeda6ad92351a7/psutil-7.2.2-cp37-abi3-win_amd64.whl",
+            "sha256": "eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988"
+          }
+        ]
+      },
+      "pybcj": {
+        "version": "1.0.8",
+        "wheels": [
+          {
+            "filename": "pybcj-1.0.8-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/56/04/c9b5dee7004f9b9f7dfb12c9a14b0929cacf1a8410e783f1df98e77cd2f6/pybcj-1.0.8-cp310-cp310-win_amd64.whl",
+            "sha256": "b372f40aadb429de71cfc86ff7b8a52e753bd357eef5c03c3eb3b823709982fd"
+          },
+          {
+            "filename": "pybcj-1.0.8-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/e1/1c/386a50186383045293cd0e1e969a48143e0c073a18fed3dd0b7edec935e3/pybcj-1.0.8-cp311-cp311-win_amd64.whl",
+            "sha256": "090eb05fe7a2f7cd7eb42809616ce1b49437c3e995a8aae2faa92b66f218172f"
+          },
+          {
+            "filename": "pybcj-1.0.8-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/7b/c3/daddd6edc01689b1cb75733bd3098231bae20c9e77d7022dc0b1c40e56fd/pybcj-1.0.8-cp312-cp312-win_amd64.whl",
+            "sha256": "26e3e4d287f306996902289fc0e88b36d0fc817802f4fc4537b40a6518726585"
+          },
+          {
+            "filename": "pybcj-1.0.8-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/39/f4/04d46f5059af00d2fae6086a7f47ebc23e553900ca75ea2a2e276d3a436c/pybcj-1.0.8-cp313-cp313-win_amd64.whl",
+            "sha256": "e47d9c655d276200e5d08f7b550097dacc826364b44931f0fbdc0da2e4bdf448"
+          },
+          {
+            "filename": "pybcj-1.0.8-cp314-cp314-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/87/c4/767af5f90007cf5b138b2b4b40cf34998ca143fb22210c9d718d04eb2b22/pybcj-1.0.8-cp314-cp314-win_amd64.whl",
+            "sha256": "0074af187b1acce9e31717fc9aa42bc36b67f1a44088a8b44f4f4792af688ee6"
+          }
+        ]
+      },
+      "pycryptodomex": {
+        "version": "3.24.0",
+        "wheels": [
+          {
+            "filename": "pycryptodomex-3.24.0-cp37-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/4d/91/fa406bbeea093b53d314dfb0fd186658a69a398b73a3a609636b8402b5c3/pycryptodomex-3.24.0-cp37-abi3-win_amd64.whl",
+            "sha256": "55f22d72250d7923aac3c2442ec6a1dd8774d2efa3bdcb0f68d5e137d372268e"
+          }
+        ]
+      },
+      "pyppmd": {
+        "version": "1.3.1",
+        "wheels": [
+          {
+            "filename": "pyppmd-1.3.1-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/1b/93/1e035bd1ef405ca024be1fc4d9eb7d603eb03960d7010515ddf155dcccd2/pyppmd-1.3.1-cp310-cp310-win_amd64.whl",
+            "sha256": "1e503a28c9a275d31f24af9b735d2cca543b62f438b064e2833e9833e758bdbc"
+          },
+          {
+            "filename": "pyppmd-1.3.1-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/b5/d3/5fe05bdccdd7af04461c25a3dc34799f48ad3e9a2bd591aaec9afbc1d10a/pyppmd-1.3.1-cp311-cp311-win_amd64.whl",
+            "sha256": "23b83799f33f9a24577f22e092b0feecda8cd1ea33871ad8610a58629874f7bc"
+          },
+          {
+            "filename": "pyppmd-1.3.1-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/ee/29/1398c6f67dfb66367babeed2980caee837d0a488705e3dff7ff159e017e7/pyppmd-1.3.1-cp312-cp312-win_amd64.whl",
+            "sha256": "c8c1ad39e7ebde71bf5a54cf61f489bf4790f1dd0beb70dc2e8f5ad3329d7ca7"
+          },
+          {
+            "filename": "pyppmd-1.3.1-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/6c/6d/311d8faca142f39b4d158c94ed7eb237a197d41dd7eb67f53442a7904e04/pyppmd-1.3.1-cp313-cp313-win_amd64.whl",
+            "sha256": "df8d84ab72381058a964ba66e5e81ed52dbd0b5ad734a5ef8353452983506098"
+          },
+          {
+            "filename": "pyppmd-1.3.1-cp314-cp314-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/12/4c/5003a413d9f2743298a070df6713a75dedccc470e7adeeced5b43cad7418/pyppmd-1.3.1-cp314-cp314-win_amd64.whl",
+            "sha256": "0e64247618cb150d2909beb0137da3084fef1d3479b4cc73b5b47fda7611abf9"
+          }
+        ]
+      },
+      "texttable": {
+        "version": "1.7.0",
+        "wheels": [
+          {
+            "filename": "texttable-1.7.0-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/24/99/4772b8e00a136f3e01236de33b0efda31ee7077203ba5967fcc76da94d65/texttable-1.7.0-py2.py3-none-any.whl",
+            "sha256": "72227d592c82b3d7f672731ae73e4d1f88cd8e2ef5b075a7a7f01a23a3743917"
+          }
+        ]
+      },
+      "backports.zstd": {
+        "version": "1.0.0",
+        "wheels": [
+          {
+            "filename": "backports_zstd-1.0.0-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/db/39/f322cf4d8b3194353a5bc01db6f2829835d1df273e93ebd1607f130213b5/backports_zstd-1.0.0-cp310-cp310-win_amd64.whl",
+            "sha256": "5d2fb3f4d53b2f92a26e7fc34b313ac5eebd7ff437f37f8f5c308d72c844fbd7"
+          },
+          {
+            "filename": "backports_zstd-1.0.0-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/3b/b1/726a07d04b85a687776b04b53a02b7d2c4b666d51b18c44fa2ddaadfe383/backports_zstd-1.0.0-cp311-cp311-win_amd64.whl",
+            "sha256": "f009996762b887d1bf9330ac0ce1e83608db0b881f63644ae30f2b6a290cd36b"
+          },
+          {
+            "filename": "backports_zstd-1.0.0-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/7f/14/615cd31c0de23e330e13ba77a6aed9a1d27360ebdf5e68b078c54b8cdbdb/backports_zstd-1.0.0-cp312-cp312-win_amd64.whl",
+            "sha256": "f1bb3e6d21ebfb22070288b7fb47bbb0baaae604890c4087edf5637debb6bd91"
+          },
+          {
+            "filename": "backports_zstd-1.0.0-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/75/5a/318d40e1589908a44532e2c850fedfaedbf4e7c75b6fa3cf4b532fcadc84/backports_zstd-1.0.0-cp313-cp313-win_amd64.whl",
+            "sha256": "d68f7f72579070bfef7890ba5316701c001e90b4455bb5c2591558b9d53a7f6e"
+          }
+        ]
+      }
+    },
+    "native": [
+      {
+        "name": "bzip2",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-bzip2-1.0.8-4-any.pkg.tar.zst",
+        "sha256": "f03a2174034ddd2d96cecd34f617c5f8e2ef86c812b8d2bb3b8875257f2c8bfa",
+        "dlls": [
+          "ucrt64/bin/libbz2-1.dll"
+        ],
+        "licenses": [
+          "ucrt64/share/licenses/bzip2/LICENSE"
+        ]
+      },
+      {
+        "name": "expat",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-expat-2.8.5-1-any.pkg.tar.zst",
+        "sha256": "f47c7e78d4664c5cce7b26605f3c2dfcfad4a8ed2e9445c952f8f8863d5e7eb9",
+        "dlls": [
+          "ucrt64/bin/libexpat-1.dll"
+        ],
+        "licenses": [
+          "ucrt64/share/licenses/expat/COPYING"
+        ]
+      },
+      {
+        "name": "libarchive",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-libarchive-3.8.9-6-any.pkg.tar.zst",
+        "sha256": "e19e2386eabd743494db13617aafc0a1dde159074580d2e1d6a919af49bdb6c8",
+        "dlls": [
+          "ucrt64/bin/libarchive-13.dll"
+        ],
+        "licenses": [
+          "ucrt64/share/licenses/libarchive/LICENSE"
+        ]
+      },
+      {
+        "name": "libb2",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-libb2-0.98.1-3-any.pkg.tar.zst",
+        "sha256": "dfb554635119d3c46adb00c9d0c589bb38d1cb0781b10ecf31de07ce388bd0c0",
+        "dlls": [
+          "ucrt64/bin/libb2-1.dll"
+        ],
+        "licenses": [
+          "ucrt64/share/licenses/libb2/LICENSE"
+        ]
+      },
+      {
+        "name": "libiconv",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-libiconv-1.19-1-any.pkg.tar.zst",
+        "sha256": "9a500f38c2b91808741c62fae746b3e9110b33a1ecf5c30fa0c66dbedddf7e16",
+        "dlls": [
+          "ucrt64/bin/libiconv-2.dll"
+        ],
+        "licenses": [
+          "ucrt64/share/licenses/libiconv/COPYING",
+          "ucrt64/share/licenses/libiconv/COPYING.LIB",
+          "ucrt64/share/licenses/libiconv/README",
+          "ucrt64/share/licenses/libiconv/libcharset/COPYING.LIB"
+        ]
+      },
+      {
+        "name": "lz4",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-lz4-1.10.0-1-any.pkg.tar.zst",
+        "sha256": "00a807df81a4b7e82445178b8625962ed592cf1f0a08a8e04c8b9338c4362638",
+        "dlls": [
+          "ucrt64/bin/liblz4.dll"
+        ],
+        "licenses": []
+      },
+      {
+        "name": "xz",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-xz-5.8.4-1-any.pkg.tar.zst",
+        "sha256": "a9d771f816d8c0c5bde152ffb27a687ede91079b8e77e5b8297efa3b5a835934",
+        "dlls": [
+          "ucrt64/bin/liblzma-5.dll"
+        ],
+        "licenses": [
+          "ucrt64/share/licenses/xz/COPYING",
+          "ucrt64/share/licenses/xz/COPYING.0BSD",
+          "ucrt64/share/licenses/xz/COPYING.GPLv2",
+          "ucrt64/share/licenses/xz/COPYING.GPLv3",
+          "ucrt64/share/licenses/xz/COPYING.LGPLv2.1"
+        ]
+      },
+      {
+        "name": "zlib",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-zlib-1.3.2-2-any.pkg.tar.zst",
+        "sha256": "841401182976d2f9e17e5c0ebaac51f2a8014140ea53d67625e91c8fb3c85ea0",
+        "dlls": [
+          "ucrt64/bin/zlib1.dll"
+        ],
+        "licenses": [
+          "ucrt64/share/licenses/zlib/LICENSE"
+        ]
+      },
+      {
+        "name": "zstd",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-zstd-1.5.7-2-any.pkg.tar.zst",
+        "sha256": "dbdb8427280046a2b41697780aa4c52983b708082b0da4755951dc3bea96ca89",
+        "dlls": [
+          "ucrt64/bin/libzstd.dll"
+        ],
+        "licenses": [
+          "ucrt64/share/licenses/zstd/LICENSE"
+        ]
+      }
+    ],
+    "licenses": [
+      {
+        "filename": "LZ4-LICENSE",
+        "url": "https://raw.githubusercontent.com/lz4/lz4/v1.10.0/lib/LICENSE",
+        "sha256": "8b58c446121a109ccf32edc094bba3010a3d85e4ee3702950db55e4d3e87736c"
+      }
+    ]
+  }
+}

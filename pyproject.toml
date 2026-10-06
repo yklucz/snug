@@ -31,6 +31,6 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.pyright]
-include = ["snug.py", "snug_core.py", "snug_ext.py"]
+include = ["snug.py", "snug_core.py", "snug_ext.py", "snug_runtime.py"]
 pythonVersion = "3.10"
 typeCheckingMode = "standard"

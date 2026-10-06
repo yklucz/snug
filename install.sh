@@ -1,65 +1,45 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-RAW_BASE="https://raw.githubusercontent.com/yklucz/snug/main"
+RAW_BASE="${SNUG_RAW_BASE:-https://raw.githubusercontent.com/yklucz/snug/main}"
 PREFIX="${SNUG_PREFIX:-${HOME}/.local}"
-BIN_DIR="${PREFIX}/bin"
-APP_DIR="${PREFIX}/share/snug"
-LAUNCHER="${BIN_DIR}/snug"
+BIN_DIR="$PREFIX/bin"
+APP_DIR="$PREFIX/share/snug"
+LAUNCHER="$BIN_DIR/snug"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
-info() { printf '==> %s\n' "$*"; }
-
 command -v curl >/dev/null 2>&1 || die 'curl is required'
-PYTHON=""
-for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1; then
-    if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)' >/dev/null 2>&1; then
-      PYTHON="$(command -v "$candidate")"
-      break
-    fi
-  fi
+case "$(uname -s)" in Darwin|Linux) ;; *) die 'Use install.ps1 on Windows';; esac
+mkdir -p "$BIN_DIR" "$PREFIX/share"
+STAGING="$(mktemp -d "$PREFIX/share/.snug-install.XXXXXX")"
+NEW_LAUNCHER="$(mktemp "$BIN_DIR/.snug-launcher.XXXXXX")"
+trap 'rm -rf "$STAGING"; rm -f "$NEW_LAUNCHER"' EXIT
+printf '==> Downloading Snug\n'
+for source in snug.py snug_core.py snug_ext.py snug_runtime.py runtime.sh runtime-lock.json; do
+  curl -fsSL --retry 2 "$RAW_BASE/$source" -o "$STAGING/$source"
 done
-[[ -n "$PYTHON" ]] || die 'Python 3.10+ is required'
-
-mkdir -p "$BIN_DIR" "$APP_DIR"
-STAGING="$(mktemp -d)"
-trap 'rm -rf "$STAGING"' EXIT
-info 'Downloading Snug'
-for source in snug.py snug_core.py snug_ext.py; do
-  curl -fsSL "$RAW_BASE/$source" -o "$STAGING/$source"
-  "$PYTHON" -m py_compile "$STAGING/$source" || die 'downloaded source failed syntax check'
-done
-
-# Keep dependencies isolated from system Python; never use sudo or compile them.
-"$PYTHON" -m venv "$APP_DIR/venv" || die 'Python venv support is required (Debian/Ubuntu: install python3-venv)'
-APP_PYTHON="$APP_DIR/venv/bin/python"
-if ! "$APP_PYTHON" -m pip install --disable-pip-version-check --only-binary=:all: 'libarchive-c>=5.3,<6' 'py7zr>=1.1.3,<2'; then
-  info 'Optional backends could not be installed. Native ZIP/TAR and compression streams remain available.'
-  printf 'Retry: "%s" -m pip install --only-binary=:all: "libarchive-c>=5.3,<6" "py7zr>=1.1.3,<2"\n' "$APP_PYTHON"
+# All backends must validate before replacing an existing working installation.
+bash "$STAGING/runtime.sh" "$STAGING" --prepare
+bash "$STAGING/runtime.sh" "$STAGING" --run --version >/dev/null
+if [[ -d "$APP_DIR" ]]; then
+  [[ ! -e "$APP_DIR.previous" ]] || die 'An earlier installation backup exists; move it aside before reinstalling.'
+  mv "$APP_DIR" "$APP_DIR.previous"
 fi
-# Verify the complete downloaded set before replacing the installed modules.
-"$APP_PYTHON" "$STAGING/snug.py" --version >/dev/null || die 'downloaded Snug failed its startup check'
-for source in snug.py snug_core.py snug_ext.py; do
-  mv "$STAGING/$source" "$APP_DIR/$source"
-  chmod 644 "$APP_DIR/$source"
-done
-cat > "$LAUNCHER" <<LAUNCH
-#!/usr/bin/env bash
-exec "$APP_PYTHON" "$APP_DIR/snug.py" "\$@"
-LAUNCH
-chmod 755 "$LAUNCHER"
-"$LAUNCHER" --version
-
-if ! "$APP_PYTHON" -c 'import sys; sys.path.insert(0, sys.argv[1]); from snug_ext import LibarchiveBackend; raise SystemExit(0 if LibarchiveBackend().available() else 1)' "$APP_DIR"; then
-  printf '\nlibarchive support unavailable. Install the native library:\n'
-  case "$(uname -s)" in
-    Darwin) printf '  brew install libarchive\n' ;;
-    Linux) printf '  Debian/Ubuntu: sudo apt install libarchive13\n  Fedora: sudo dnf install libarchive\n  Arch: sudo pacman -S libarchive\n' ;;
-  esac
-  printf 'If needed, set LIBARCHIVE to the full path of the shared library.\n'
+if ! mv "$STAGING" "$APP_DIR"; then
+  [[ ! -d "$APP_DIR.previous" ]] || mv "$APP_DIR.previous" "$APP_DIR"
+  die 'Could not replace the installed application'
 fi
-info "Installed Snug to $LAUNCHER"
+# %q preserves spaces and shell metacharacters in a custom installation prefix.
+printf '#!/usr/bin/env bash\nexec bash %q %q --run "$@"\n' "$APP_DIR/runtime.sh" "$APP_DIR" > "$NEW_LAUNCHER"
+chmod 755 "$NEW_LAUNCHER"
+if ! "$NEW_LAUNCHER" --version; then
+  mv "$APP_DIR" "$STAGING"
+  [[ ! -d "$APP_DIR.previous" ]] || mv "$APP_DIR.previous" "$APP_DIR"
+  die 'Installed startup check failed; the previous installation was restored'
+fi
+mv "$NEW_LAUNCHER" "$LAUNCHER"
+[[ ! -d "$APP_DIR.previous" ]] || rm -rf "$APP_DIR.previous"
+printf '==> Installed Snug to %s\n' "$LAUNCHER"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) printf '\nAdd this to your shell profile if needed:\n  export PATH="%s:$PATH"\n\n' "$BIN_DIR" ;;
