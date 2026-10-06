@@ -14,7 +14,7 @@ SOURCE_FILES = {
     *MODULES, "snug_runtime.py", "pyproject.toml", "MANIFEST.in",
     "README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md",
     ".gitattributes", ".gitignore", "runtime-lock.json",
-    "install.sh", "install.ps1", "runtime.sh", "runtime.ps1",
+    "install.sh", "runtime.sh",
 }
 LOCAL_DIRS = {
     ".git", ".github", ".venv", "venv", "env", "ENV", "build", "dist",
