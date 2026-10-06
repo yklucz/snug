@@ -60,6 +60,10 @@ Snug owns directory creation and file/link writes. Libraries do not receive unre
 
 Permissions and modification times are restored when available and enabled. Permission restoration masks to ordinary `0o777` bits; ownership, ACLs, and extended attributes are not restored. Metadata failures are best effort. Directory metadata is deferred until children are written, then applied deepest first with containment checks. Extraction is incremental, with no transaction that rolls back already written files.
 
+## Update boundary
+
+[snug_update.py](../snug_update.py) provides shared release metadata checks, semantic version comparison, automatic-check preferences/state, and periodic background checking. The CLI controls when a terminal notice is appropriate. Windows checks and preferences use per-user state; manual installation is managed externally through the PowerShell installer. The macOS/Linux managed replacement implementation remains shared source and does not run on Windows. See [Updates](updates.md).
+
 ## Managed runtime boundary
 
 [snug_runtime.py](../snug_runtime.py), the platform launchers, and [runtime-lock.json](../runtime-lock.json) belong to the managed installation workflow. They activate application-owned bindings/packages, locate native libraries, probe dependencies, and repair failures before calling the CLI. They are separate from the source/pip entry point. [Runtime management](runtime.md) explains integrity, ownership, and update procedures; [Development](development.md) describes extension points.

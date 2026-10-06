@@ -21,9 +21,12 @@ snug create backup.7z folder/
 snug extract archive.rar -C output/
 snug list backup.7z
 snug info backup.7z
+snug update --check
 ```
 
 With no arguments, `snug` opens the interactive terminal interface. Snug remains a CLI tool; all archive commands use explicit full command names.
+
+Automatic release checks never install updates. Windows installation remains managed through the PowerShell installer; see [Updates](docs/updates.md) for checks, preferences, and reinstall guidance.
 
 ## Supported formats
 
@@ -35,6 +38,7 @@ See [Supported formats](docs/supported-formats.md) for creation support, backend
 
 - [Installation](docs/installation.md)
 - [Usage](docs/usage.md)
+- [Updates](docs/updates.md)
 - [Supported formats](docs/supported-formats.md)
 - [Architecture](docs/architecture.md)
 - [Security](docs/security.md)

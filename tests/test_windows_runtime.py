@@ -1,6 +1,7 @@
 """Run on Windows CI, including the no-existing-Python installation path."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -89,10 +90,12 @@ if ([OfflineRequest]::Calls -ne 11 -or (Test-Path $Destination)) { throw 'Redire
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.skipif(os.environ.get("SNUG_WINDOWS_LIVE_BOOTSTRAP") != "1",
+                   reason="set SNUG_WINDOWS_LIVE_BOOTSTRAP=1 for live runtime downloads")
 def test_windows_bootstrap_password_workflow_and_deleted_dll_repair(tmp_path):
-    app = tmp_path / "Snug runtime with spaces"
+    app = tmp_path / "Snug runtime Tiếng Việt 📦 author's (app)"
     app.mkdir()
-    for name in ("snug.py", "snug_core.py", "snug_ext.py", "snug_runtime.py", "runtime.ps1", "runtime-lock.json"):
+    for name in ("snug.py", "snug_core.py", "snug_ext.py", "snug_runtime.py", "snug_update.py", "runtime.ps1", "runtime-lock.json"):
         shutil.copyfile(ROOT / name, app / name)
     powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     env = dict(os.environ)
@@ -100,19 +103,22 @@ def test_windows_bootstrap_password_workflow_and_deleted_dll_repair(tmp_path):
     # Reproduce an intermediate Python process inheriting a module search
     # path without Windows PowerShell's built-ins (as with PowerShell 7).
     env["PSMODULEPATH"] = str(tmp_path / "PowerShell7Modules")
+    env["SNUG_NO_UPDATE_CHECK"] = "1"
+    env["LOCALAPPDATA"] = str(tmp_path / "local app data")
+    env["PYTHONIOENCODING"] = "utf-8"
     for key in ("LIBARCHIVE", "SNUG_LIBRARY", "SNUG_PACKAGES"):
         env.pop(key, None)
     def run(*args):
         return subprocess.run([str(powershell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                                str(app / "runtime.ps1"), *map(str, args)], env=env,
-                              capture_output=True, text=True, timeout=240)
+                              capture_output=True, encoding="utf-8", timeout=240)
     version = run("--version")
     assert version.returncode == 0, version.stderr
     assert "snug 1.8.0" in version.stdout
     assert (app / "python/python.exe").is_file()
     assert not list(app.rglob("pip"))
     assert not list(app.glob(".repair-*"))
-    source = tmp_path / "source with spaces.txt"
+    source = tmp_path / "Tài liệu author's 📦 (notes) [final].txt"
     source.write_text("managed Windows payload")
     secret = tmp_path / "password.txt"
     secret.write_text("windows-test-secret\n")
@@ -132,3 +138,15 @@ def test_windows_bootstrap_password_workflow_and_deleted_dll_repair(tmp_path):
     assert dll.is_file()
     assert not list(app.glob(".repair-*"))
     assert not list(app.glob(".python-*"))
+    disabled = run("update", "--disable-checks")
+    assert disabled.returncode == 0, disabled.stderr
+    state = tmp_path / "local app data/Snug/state/update.json"
+    assert state.is_file()
+    assert json.loads(state.read_text())["automatic_checks"] is False
+    enabled = run("update", "--enable-checks")
+    assert enabled.returncode == 0, enabled.stderr
+    assert json.loads(state.read_text())["automatic_checks"] is True
+    unsupported = run("update")
+    assert unsupported.returncode == 2
+    assert "managed externally" in unsupported.stderr
+    assert "Traceback" not in unsupported.stderr

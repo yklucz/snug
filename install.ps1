@@ -40,7 +40,7 @@ function Save-HttpsFile([Uri]$Uri, [string]$Destination) {
 New-Item -ItemType Directory -Path $Staging | Out-Null
 try {
     Write-Host '==> Downloading Snug'
-    foreach ($Source in @('snug.py', 'snug_core.py', 'snug_ext.py', 'snug_runtime.py', 'runtime.ps1', 'runtime-lock.json')) {
+    foreach ($Source in @('snug.py', 'snug_core.py', 'snug_ext.py', 'snug_runtime.py', 'snug_update.py', 'runtime.ps1', 'runtime-lock.json')) {
         Save-HttpsFile ([Uri]"$RawBase/$Source") (Join-Path $Staging $Source)
     }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Staging 'runtime.ps1') -PrepareOnly

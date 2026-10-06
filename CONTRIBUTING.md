@@ -8,7 +8,7 @@ Use Python 3.10 or newer and an isolated environment. Install native libarchive 
 git clone --branch windows https://github.com/yklucz/snug.git
 cd snug
 python -m pip install '.[all,test]'
-python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py tests
+python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py snug_update.py tests
 npx --yes pyright@1.1.414
 pytest -q
 ```

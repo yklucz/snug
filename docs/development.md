@@ -19,13 +19,13 @@ npx --yes pyright@1.1.414
 pytest -q
 ```
 
-The Pyright command requires Node.js/npm and downloads that version when it is not cached. Its configuration in [pyproject.toml](../pyproject.toml) checks all four Python modules against Python 3.10 in standard mode. `compileall .` also traverses local environments; a smaller equivalent for the project files and available tests is:
+The Pyright command requires Node.js/npm and downloads that version when it is not cached. Its configuration in [pyproject.toml](../pyproject.toml) checks the CLI, archive, runtime, and updater modules against Python 3.10 in standard mode. `compileall .` also traverses local environments; a smaller equivalent for the project files and available tests is:
 
 ```bash
-python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py tests
+python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py snug_update.py tests
 ```
 
-The [CI workflow](../.github/workflows/tests.yml) on this branch targets Windows with standard x64 CPython 3.10 and 3.14, the managed runtime's supported range boundaries. It installs `.[all,test]`, prepares the locked Windows native libarchive dependencies, and runs compilation and pytest, including PowerShell HTTPS/bootstrap/repair tests. Wheel-selection tests cover every supported minor version from 3.10 through 3.14. Python 3.14 also runs pinned Pyright, built-artifact validation, and an isolated installed-wheel ZIP round trip. The no-existing-Python test validates the locked embedded fallback independently of the matrix interpreter. Unix-specific launcher tests skip on Windows. Review actual job results before claiming Windows compatibility; a test run on macOS/Linux does not validate Windows PowerShell or DLL behavior.
+The [CI workflow](../.github/workflows/tests.yml) on this branch targets Windows with standard x64 CPython 3.10 and 3.14, the managed runtime's supported range boundaries. It installs `.[all,test]`, prepares the locked Windows native libarchive dependencies, and runs compilation and pytest, including offline PowerShell HTTPS helper tests. The live embedded bootstrap/password/DLL-repair test is opt-in with `SNUG_WINDOWS_LIVE_BOOTSTRAP=1` and runs in a separate Python 3.14 CI step; normal pytest does not download runtime artifacts. Wheel-selection tests cover every supported minor version from 3.10 through 3.14. Python 3.14 also runs pinned Pyright, built-artifact validation, and an isolated installed-wheel ZIP round trip. The no-existing-Python test validates the locked embedded fallback independently of the matrix interpreter. Unix-specific launcher tests skip on Windows. Review actual job results before claiming Windows compatibility; a test run on macOS/Linux does not validate Windows PowerShell or DLL behavior.
 
 ## Project layout
 
@@ -34,6 +34,7 @@ The [CI workflow](../.github/workflows/tests.yml) on this branch targets Windows
 | [snug.py](../snug.py) | Argument parser, command handlers, terminal menu/picker, presentation |
 | [snug_core.py](../snug_core.py) | Archive engine, native containers/streams, detection, shared extraction policy, reports/progress |
 | [snug_ext.py](../snug_ext.py) | Optional py7zr and libarchive adapters |
+| [snug_update.py](../snug_update.py) | Shared release checks, automatic-check preferences/state, and macOS/Linux managed update implementation |
 | [snug_runtime.py](../snug_runtime.py) | Managed dependency verification, activation, repair, and storage reporting |
 | [install.sh](../install.sh), [install.ps1](../install.ps1) | Staged installation and launcher creation |
 | [runtime.sh](../runtime.sh), [runtime.ps1](../runtime.ps1) | Platform startup and dependency repair |
@@ -50,11 +51,11 @@ The flat module layout remains intentional for the current release: installers f
 
 ## Public source and release artifacts
 
-The Git repository contains all four implementation modules, tests and legal fixtures, documentation, CI, installers, runtime helpers, and lock metadata. Tests and security-related implementation remain public so the complete behavior can be audited. Public artifact URLs, versions, and SHA256 hashes in `runtime-lock.json` are reproducibility data.
+The Git repository contains all five implementation modules, tests and legal fixtures, documentation, CI, installers, runtime helpers, and lock metadata. Tests and security-related implementation remain public so the complete behavior can be audited. Public artifact URLs, versions, and SHA256 hashes in `runtime-lock.json` are reproducibility data.
 
 The source distribution includes the modules, tests/fixtures, docs, developer scripts, lock, installers, runtime helpers, license, and contribution/security policies. It deliberately excludes `.github/`, local settings, generated runtime directories, caches, environments, and test outputs. CI workflows remain in the Git repository.
 
-The wheel installs `snug`, `snug_core`, and `snug_ext`, the CLI entry point, and package metadata/license. It does not install tests, docs, CI, managed dependencies, or the managed-only `snug_runtime.py`, lock, and platform scripts into `site-packages`. The complete runtime-management source remains public in Git and the source distribution. Source/pip commands use their chosen environment rather than automatic repair.
+The wheel installs `snug`, `snug_core`, `snug_ext`, and `snug_update`, the CLI entry point, and package metadata/license. It does not install tests, docs, CI, managed dependencies, or the managed-only `snug_runtime.py`, lock, and platform scripts into `site-packages`. The complete runtime-management source remains public in Git and the source distribution. Source/pip commands use their chosen environment rather than automatic repair.
 
 Build both artifacts in a temporary or ignored output directory:
 
@@ -72,7 +73,7 @@ A future `src/snug/` package may separate the CLI, core policy, runtime manageme
 
 ## Tests and fixture provenance
 
-The suite groups native formats, CLI behavior, extraction security, optional backends, terminal UI, managed runtime helpers, and Windows bootstrap behavior. Optional tests use import/availability skips when py7zr or native libarchive cannot load. Symlink tests may skip when privileges are missing; Windows bootstrap tests require a Windows host. Review skips before making backend or cross-platform claims.
+The suite groups native formats, CLI behavior, extraction security, optional backends, terminal UI/path handling, updater metadata/state/failure cases, managed runtime helpers, and Windows bootstrap behavior. Optional tests use import/availability skips when py7zr or native libarchive cannot load. Symlink tests may skip when privileges are missing; Windows bootstrap tests require a Windows host and the explicit `SNUG_WINDOWS_LIVE_BOOTSTRAP=1` gate because they download locked Python/native artifacts. Run the gated test against a disposable temporary installation; it does not update your installed Snug. Normal updater/archive/path tests use mocked networking or disabled automatic checks. Review skips before making backend or cross-platform claims.
 
 Fixture provenance is documented in [tests/fixtures/README.md](../tests/fixtures/README.md), with byte sizes, SHA256 hashes, and upstream URLs in [manifest.json](../tests/fixtures/manifest.json). Independent `test_read_format_*` archives come from the official libarchive v3.8.1 tests, decoded from uuencoded files; the ISO fixture was also decompressed from Unix `.Z`. Original licensing and notices are retained beside the fixtures. The XAR and traditional encrypted ZIP samples were generated independently with libarchive-c and have locally generated MIT-licensed content. Tests also generate native, adversarial, CPIO/7z, and AR/DEB archives at runtime.
 
@@ -94,3 +95,7 @@ Creation must preserve existing archives on backend failure, clean staging files
 6. Update the [format matrix](supported-formats.md), [Usage](usage.md), and relevant installation/troubleshooting guidance. Run checks with the optional backend present and absent, and validate actual platform workflows before expanding platform claims.
 
 If format support changes, update the tests and provenance together. A new libarchive release advertising a reader is insufficient by itself to claim new Snug support.
+
+## Current scope and deferred work
+
+This checkout provides `create`, `extract`, `list`, `info`, and `update`, plus the existing terminal TUI. Shared updater checks/preferences work on Windows; manual Windows self-update reports external-installation guidance. See [Updates](updates.md) for PowerShell reinstall instructions and `%LOCALAPPDATA%\Snug\state\update.json`. Transactional extraction, global resource limits, `snug test`, `snug doctor`, `snug formats`, completion, batch extraction, and broader TUI changes remain deferred. Do not document those commands as implemented.

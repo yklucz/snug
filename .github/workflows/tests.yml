@@ -34,9 +34,14 @@ jobs:
           "LIBARCHIVE=$PWD\native\libarchive-13.dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Compile and test
         run: |
-          python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py tests
+          python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py snug_update.py tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pytest -q
+      - name: Verify live embedded bootstrap and DLL repair separately
+        if: matrix.python == '3.14'
+        env:
+          SNUG_WINDOWS_LIVE_BOOTSTRAP: '1'
+        run: python -m pytest -q tests/test_windows_runtime.py::test_windows_bootstrap_password_workflow_and_deleted_dll_repair
       - name: Type check
         if: matrix.python == '3.14'
         run: npx --yes pyright@1.1.414
@@ -62,6 +67,7 @@ jobs:
           $SmokeRoot = Join-Path $env:RUNNER_TEMP 'snug wheel smoke'
           New-Item -ItemType Directory -Path $SmokeRoot | Out-Null
           Set-Location $SmokeRoot
+          $env:SNUG_NO_UPDATE_CHECK = '1'
           $Source = Join-Path $SmokeRoot 'payload with spaces.txt'
           Set-Content -LiteralPath $Source -Value 'installed wheel payload' -Encoding utf8
           & $Snug --version
