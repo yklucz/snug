@@ -1,0 +1,64 @@
+# Development
+
+[← Back to README](../README.md)
+
+## Environment and checks
+
+Use Python 3.10 or newer and an isolated environment from the repository root. Install native libarchive as described in [Installation](installation.md), then install Python extras and run the checks:
+
+```bash
+python -m pip install '.[all,test]'
+python -m compileall .
+npx --yes pyright@1.1.414
+pytest -q
+```
+
+The Pyright command requires Node.js/npm and downloads that version when it is not cached. Its configuration in [pyproject.toml](../pyproject.toml) checks all four Python modules against Python 3.10 in standard mode. `compileall .` also traverses local environments; a smaller equivalent for the project files and available tests is:
+
+```bash
+python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py tests
+```
+
+The [CI workflow](../.github/workflows/tests.yml) declares macOS, Linux, and Windows jobs on Python 3.10 and 3.14. It installs `.[all,test]` plus native libarchive and runs compilation and pytest. Review actual job results before claiming that every platform has passed.
+
+## Project layout
+
+| Path | Responsibility |
+|---|---|
+| [snug.py](../snug.py) | Argument parser, command handlers, terminal menu/picker, presentation |
+| [snug_core.py](../snug_core.py) | Archive engine, native containers/streams, detection, shared extraction policy, reports/progress |
+| [snug_ext.py](../snug_ext.py) | Optional py7zr and libarchive adapters |
+| [snug_runtime.py](../snug_runtime.py) | Managed dependency verification, activation, repair, and storage reporting |
+| [install.sh](../install.sh), [install.ps1](../install.ps1) | Staged installation and launcher creation |
+| [runtime.sh](../runtime.sh), [runtime.ps1](../runtime.ps1) | Platform startup and dependency repair |
+| [runtime-lock.json](../runtime-lock.json) | Managed artifact URLs, versions, hashes, DLL/license members |
+| [pyproject.toml](../pyproject.toml) | Package metadata, extras, CLI entry point, pytest/Pyright configuration |
+| `tests/` | Test suite and vendored archive fixtures |
+| `docs/` | User and developer documentation |
+
+The wheel packages `snug`, `snug_core`, and `snug_ext`, with the `snug = snug:main` entry point. `snug_runtime.py` and the platform launchers are delivered by managed installers rather than listed as wheel modules.
+
+## Tests and fixture provenance
+
+The suite groups native formats, CLI behavior, extraction security, optional backends, terminal UI, managed runtime helpers, and Windows bootstrap behavior. Optional tests use import/availability skips when py7zr or native libarchive cannot load. Symlink tests may skip when privileges are missing; Windows bootstrap tests require a Windows host. Review skips before making backend or cross-platform claims.
+
+Fixture provenance is documented in [tests/fixtures/README.md](../tests/fixtures/README.md), with byte sizes, SHA256 hashes, and upstream URLs in [manifest.json](../tests/fixtures/manifest.json). Independent `test_read_format_*` archives come from the official libarchive v3.8.1 tests, decoded from uuencoded files; the ISO fixture was also decompressed from Unix `.Z`. Original licensing and notices are retained beside the fixtures. The XAR and traditional encrypted ZIP samples were generated independently with libarchive-c and have locally generated MIT-licensed content. Tests also generate native, adversarial, CPIO/7z, and AR/DEB archives at runtime.
+
+For new fixtures, record exact provenance and hashes, retain required licenses, and distinguish upstream evidence from locally generated samples. Do not fabricate a source URL for a local sample or use a Snug-created round trip as the only independent-reader evidence. [.gitattributes](../.gitattributes) marks archive fixtures as binary to prevent newline conversion; add a matching rule for any new fixture extension. Fixtures should remain small and tests should avoid network access unless specifically testing an installer download path.
+
+## Coding expectations
+
+Preserve Python 3.10 compatibility, annotations, the separation between UI and archive logic, lazy optional imports, and bounded payload I/O. Route extraction through shared safety helpers or checked writers; do not add unrestricted backend extraction. Escape untrusted output and redact passwords in backend errors. Keep failure messages actionable and make skipped entries explicit.
+
+Creation must preserve existing archives on backend failure, clean staging files where possible, and retain the engine's temporary-file replacement lifecycle. Keep metadata claims limited to fields actually established by the backend. Use the [Architecture](architecture.md) and [Security](security.md) pages as design context.
+
+## Add a backend or supported format
+
+1. Implement the `ArchiveBackend` contract: name, read/write format sets, availability, `can_read`, `can_write`, listing, metadata, creation, and checked extraction. An optional nonrecursive `detect` hook can assist content detection.
+2. Register the backend in `_backends()` in the intended preference order. Keep imports lazy and ensure unavailable optional dependencies do not break native source usage.
+3. For a new format, update `ArchiveFormat`, suffix mappings, appropriate signature/backend detection, capability sets, and helpful errors. Creation format choices come from the enum, so read-only formats must still reject writes correctly.
+4. Add round trips for writable formats and independent fixtures for readers. Cover wrong/missing dependencies, renamed inputs, unsupported codecs/encryption, progress, metadata, links, malformed paths, overwrite policies, and failed creation without partial final output. Check creation rejection for read-only formats.
+5. Update optional dependencies and runtime checks only when necessary. If managed artifacts change, follow the [runtime update procedure](runtime.md#runtime-update-procedure), including wheel ABI coverage and native DLL/license manifests.
+6. Update the [format matrix](supported-formats.md), [Usage](usage.md), and relevant installation/troubleshooting guidance. Run checks with the optional backend present and absent, and validate actual platform workflows before expanding platform claims.
+
+If format support changes, update the tests and provenance together. A new libarchive release advertising a reader is insufficient by itself to claim new Snug support.
