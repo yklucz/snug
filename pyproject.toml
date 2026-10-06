@@ -14,7 +14,7 @@ dependencies = []
 
 [project.urls]
 Repository = "https://github.com/yklucz/snug"
-Documentation = "https://github.com/yklucz/snug/tree/main/docs"
+Documentation = "https://github.com/yklucz/snug/tree/windows/docs"
 Issues = "https://github.com/yklucz/snug/issues"
 
 [project.scripts]

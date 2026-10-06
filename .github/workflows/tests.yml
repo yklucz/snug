@@ -1,4 +1,4 @@
-name: tests
+name: Windows tests
 
 on:
   push:
@@ -8,19 +8,16 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
-        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
-        include:
-          - os: macos-latest
-            python: '3.14'
-          - os: windows-latest
-            python: '3.14'
+        python: ['3.10', '3.14']
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@v7
         with:
@@ -30,15 +27,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install test dependencies
         run: python -m pip install '.[all,test]'
-      - name: Install native libarchive on Linux
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libarchive-dev
-      - name: Install native libarchive on macOS
-        if: runner.os == 'macOS'
-        run: brew install libarchive
       - name: Prepare native libarchive on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
         run: |
           python snug_runtime.py --windows-repair
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -46,25 +35,46 @@ jobs:
       - name: Compile and test
         run: |
           python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pytest -q
       - name: Type check
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14'
+        if: matrix.python == '3.14'
         run: npx --yes pyright@1.1.414
       - name: Build and check release contents
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14'
+        if: matrix.python == '3.14'
         run: |
           python -m pip install build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/check_release.py dist
       - name: Verify the installed wheel outside the checkout
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14'
-        shell: bash
+        if: matrix.python == '3.14'
         run: |
-          python -m venv "$RUNNER_TEMP/snug-wheel"
-          "$RUNNER_TEMP/snug-wheel/bin/python" -m pip install --no-deps dist/*.whl
-          cd "$RUNNER_TEMP"
-          "$RUNNER_TEMP/snug-wheel/bin/snug" --version
-          "$RUNNER_TEMP/snug-wheel/bin/snug" create smoke.zip "$GITHUB_WORKSPACE/tests"
-          "$RUNNER_TEMP/snug-wheel/bin/snug" list smoke.zip
-          "$RUNNER_TEMP/snug-wheel/bin/snug" info smoke.zip
-          "$RUNNER_TEMP/snug-wheel/bin/snug" extract smoke.zip -C smoke-output
+          $WheelRoot = Join-Path $env:RUNNER_TEMP 'snug-wheel'
+          python -m venv $WheelRoot
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $WheelPython = Join-Path $WheelRoot 'Scripts/python.exe'
+          $Snug = Join-Path $WheelRoot 'Scripts/snug.exe'
+          $Wheel = (Get-ChildItem -LiteralPath dist -Filter *.whl).FullName
+          & $WheelPython -m pip install --no-deps $Wheel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $SmokeRoot = Join-Path $env:RUNNER_TEMP 'snug wheel smoke'
+          New-Item -ItemType Directory -Path $SmokeRoot | Out-Null
+          Set-Location $SmokeRoot
+          $Source = Join-Path $SmokeRoot 'payload with spaces.txt'
+          Set-Content -LiteralPath $Source -Value 'installed wheel payload' -Encoding utf8
+          & $Snug --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Snug create smoke.zip $Source
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Snug list smoke.zip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Snug info smoke.zip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Snug extract smoke.zip -C smoke-output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Restored = Join-Path $SmokeRoot 'smoke-output/payload with spaces.txt'
+          if ((Get-FileHash -LiteralPath $Source).Hash -ne (Get-FileHash -LiteralPath $Restored).Hash) {
+            throw 'Installed wheel round trip changed the payload.'
+          }

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes target the current maintained release and `main`. This checkout identifies itself as Snug `1.8.0`; older releases may need an update before a fix can be applied.
+Security fixes target the current maintained release. Shared CLI/archive fixes originate on `main` and are intentionally ported to `windows`; Windows runtime and installer fixes are maintained on `windows`. This checkout identifies itself as Snug `1.8.0`; older releases may need an update before a fix can be applied.
 
 ## Reporting a vulnerability
 

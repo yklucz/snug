@@ -2,6 +2,12 @@
 
 [← Back to README](../README.md)
 
+## Branch policy
+
+`main` remains the default branch and the primary macOS/Linux project. Shared CLI, archive formats, `ArchiveEngine`, extraction security, and backend APIs originate there. This secondary `windows` branch maintains the PowerShell installer/launcher, managed Windows runtime, native dependency handling, Windows tests, and Windows CI. Port relevant shared commits intentionally, typically by cherry-picking after review; do not fork the archive engine into two independent implementations.
+
+Preserve full explicit commands and the terminal TUI. Snug has no desktop shell extensions, native graphical pickers, file associations, or GUI wrappers.
+
 ## Environment and checks
 
 Use Python 3.10 or newer and an isolated environment from the repository root. Install native libarchive as described in [Installation](installation.md), then install Python extras and run the checks:
@@ -19,7 +25,7 @@ The Pyright command requires Node.js/npm and downloads that version when it is n
 python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py tests
 ```
 
-The [CI workflow](../.github/workflows/tests.yml) runs core tests on Linux with Python 3.10–3.14 and platform tests on macOS and Windows with Python 3.14. It installs `.[all,test]` plus native libarchive and runs compilation and pytest. Linux Python 3.14 also runs the pinned Pyright version and validates built artifacts. Review actual job results before claiming that every platform has passed.
+The [CI workflow](../.github/workflows/tests.yml) on this branch targets Windows with standard x64 CPython 3.10 and 3.14, the managed runtime's supported range boundaries. It installs `.[all,test]`, prepares the locked Windows native libarchive dependencies, and runs compilation and pytest, including PowerShell HTTPS/bootstrap/repair tests. Wheel-selection tests cover every supported minor version from 3.10 through 3.14. Python 3.14 also runs pinned Pyright, built-artifact validation, and an isolated installed-wheel ZIP round trip. The no-existing-Python test validates the locked embedded fallback independently of the matrix interpreter. Unix-specific launcher tests skip on Windows. Review actual job results before claiming Windows compatibility; a test run on macOS/Linux does not validate Windows PowerShell or DLL behavior.
 
 ## Project layout
 

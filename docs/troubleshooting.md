@@ -143,7 +143,7 @@ curl -fsSL https://raw.githubusercontent.com/yklucz/snug/main/install.sh | bash
 On Windows:
 
 ```powershell
-irm https://raw.githubusercontent.com/yklucz/snug/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/yklucz/snug/windows/install.ps1 | iex
 ```
 
 For a custom Unix prefix, use the same `SNUG_PREFIX` as the original installation. Installers stage and validate the new copy before replacing the old one; they do not repair missing application files solely by launching Snug. For source installations, restore/reinstall the checkout and its chosen extras in the intended environment.

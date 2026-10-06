@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-Choose a managed installer for automatic backend setup and dependency repair, or install from source to manage Python and dependencies yourself. Managed installation and dependency downloads require internet access. A healthy installation can work offline.
+This `windows` branch maintains Windows installation and runtime support. The default `main` branch is the primary macOS/Linux project and the source of shared CLI/archive development. Choose a managed installer for automatic backend setup and dependency repair, or install from source to manage Python and dependencies yourself. Managed installation and dependency downloads require internet access. A healthy installation can work offline.
 
 ## Requirements
 
@@ -55,7 +55,7 @@ For a source installation without Linuxbrew, use your distribution's Python and 
 Run in PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/yklucz/snug/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/yklucz/snug/windows/install.ps1 | iex
 snug --version
 ```
 
@@ -78,9 +78,11 @@ python -m pip install '.[all]'
 snug --version
 ```
 
-On Windows, after cloning and entering the checkout:
+On Windows, clone the Windows branch and enter the checkout:
 
 ```powershell
+git clone --branch windows https://github.com/yklucz/snug.git
+cd snug
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install '.[all]'
 .\.venv\Scripts\snug.exe --version
