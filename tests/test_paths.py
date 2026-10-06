@@ -30,11 +30,12 @@ def run_cli(tmp_path, *args):
     env = os.environ.copy()
     env.update({
         "SNUG_NO_UPDATE_CHECK": "1",
+        "PYTHONIOENCODING": "utf-8",
         "XDG_STATE_HOME": str(tmp_path / "state"),
     })
     return subprocess.run(
         [sys.executable, str(SCRIPT), *map(str, args)],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
+        cwd=tmp_path, env=env, capture_output=True, text=True, encoding='utf-8', timeout=30,
     )
 
 

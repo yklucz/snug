@@ -153,14 +153,17 @@ def test_manual_check_works_when_automatic_checks_are_disabled(monkeypatch, isol
 
 
 @pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
-def test_platform_state_locations(monkeypatch, platform):
+def test_platform_state_locations(monkeypatch, tmp_path, platform):
+    home = tmp_path / 'home'
+    xdg = tmp_path / 'xdg'
+    local = tmp_path / 'local'
     monkeypatch.setattr(update.sys, "platform", platform)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/user")))
-    monkeypatch.setenv("XDG_STATE_HOME", "/xdg")
-    monkeypatch.setenv("LOCALAPPDATA", "/local")
-    expected = {"darwin": "/user/Library/Application Support/Snug/update.json",
-                "linux": "/xdg/snug/update.json", "win32": "/local/Snug/state/update.json"}
-    assert REAL_STATE_PATH() == Path(expected[platform])
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    expected = {"darwin": home / 'Library/Application Support/Snug/update.json',
+                "linux": xdg / 'snug/update.json', "win32": local / 'Snug/state/update.json'}
+    assert REAL_STATE_PATH() == expected[platform]
 
 
 def test_state_missing_corrupt_and_preferences(isolated_state):
@@ -436,11 +439,18 @@ def test_external_or_busy_install_refused_before_network(managed_install, monkey
     assert_preserved(root)
 
 
+def make_symlink(path, target, *, directory=False):
+    try:
+        path.symlink_to(target, target_is_directory=directory)
+    except OSError:
+        pytest.skip('symlink creation unavailable on this host')
+
+
 def test_managed_marker_cannot_be_a_symlink(managed_install):
     marker = managed_install / update.INSTALL_MARKER
     copy = marker.with_suffix(".copy")
     marker.rename(copy)
-    marker.symlink_to(copy)
+    make_symlink(marker, copy)
     with pytest.raises(update.UpdateError, match="externally"):
         update.perform_update(CURRENT)
 
@@ -455,7 +465,7 @@ def test_successful_update_preserves_runtime_launcher_and_shared_symlink(managed
     external = tmp_path / "shared Homebrew"
     external.mkdir()
     (external / "library").write_text("shared and untouched")
-    (root / "native/shared").symlink_to(external, target_is_directory=True)
+    make_symlink(root / "native/shared", external, directory=True)
     launcher = (root.parent / "snug-launcher").read_text()
     assert update.perform_update(CURRENT) == "Updated Snug from 1.8.0 to 1.10.2."
     assert (root / "snug.py").read_text() == 'print("snug 1.10.2")\n'
@@ -706,7 +716,7 @@ def test_staging_does_not_follow_a_copied_marker_symlink(managed_install, tmp_pa
     external.write_text("shared file must stay untouched")
     marker = managed_install / update.INSTALL_MARKER
     marker.unlink()
-    marker.symlink_to(external)
+    make_symlink(marker, external)
     staged = tmp_path / "stage"
     update._stage(managed_install, staged, {}, LATEST)
     assert external.read_text() == "shared file must stay untouched"
