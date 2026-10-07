@@ -124,6 +124,13 @@ function Test-Dependencies([string]$Python) {
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $Python = Find-Python
+    # Diagnostics report the existing installation, including broken optional
+    # components. They must not pass through dependency checks or repair.
+    if (-not $PrepareOnly -and $SnugArguments.Count -gt 0 -and $SnugArguments[0] -in @('doctor', 'formats')) {
+        if (-not $Python) { throw 'Offline diagnostics require an existing compatible Python runtime. No installation or repair was attempted.' }
+        $RunArguments = @('-B', (Join-Path $Root 'snug_runtime.py'), '--run') + $SnugArguments
+        exit (Invoke-Python $Python $RunArguments)
+    }
     if (-not (Test-Dependencies $Python)) {
         $Hash = [Security.Cryptography.SHA256]::Create()
         $Key = [BitConverter]::ToString($Hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant()))).Replace('-', '')

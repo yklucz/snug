@@ -5,14 +5,89 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(os.name != "nt", reason="requires a Windows host")
+windows_host = pytest.mark.skipif(os.name != "nt", reason="requires a Windows host")
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_diagnostics_launcher_bypasses_dependency_repair():
+    source = (ROOT / "runtime.ps1").read_text(encoding="utf-8")
+    diagnostic = source.index("$SnugArguments[0] -in @('doctor', 'formats')")
+    dependency_check = source.index("if (-not (Test-Dependencies $Python))", diagnostic)
+    bypass = source[diagnostic:dependency_check]
+    assert "Offline diagnostics require an existing compatible Python runtime" in bypass
+    assert "exit (Invoke-Python $Python $RunArguments)" in bypass
+    assert "Install-Python" not in bypass and "--windows-repair" not in bypass
+
+
+@windows_host
+@pytest.mark.parametrize("command", ["doctor", "formats"])
+def test_windows_diagnostics_skip_corrupt_state_and_broken_dependencies(tmp_path, command):
+    app = tmp_path / "Snug diagnostics Tiếng Việt 📦 author's (app)"
+    app.mkdir()
+    for name in ("snug.py", "snug_core.py", "snug_ext.py", "snug_runtime.py", "snug_update.py", "runtime.ps1", "runtime-lock.json"):
+        shutil.copyfile(ROOT / name, app / name)
+    (app / "runtime.json").write_text("[]", encoding="utf-8")
+    # Exercise the real diagnostic command with broken app-owned optional
+    # components. Fail explicitly if it probes, repairs, or uses the network.
+    runtime = app / "snug_runtime.py"
+    guard = '''\ndef offline_forbidden(*args, **kwargs):
+    raise AssertionError("Offline diagnostics called a probe, repair, or network")
+check = windows_repair = download = offline_forbidden
+urllib.request.urlopen = offline_forbidden
+'''
+    source = runtime.read_text(encoding="utf-8")
+    runtime.write_text(source.replace('if __name__ == "__main__":', guard + '\nif __name__ == "__main__":'), encoding="utf-8")
+    for name, error in (("vendor/libarchive", "OSError('broken fixture DLL')"),
+                        ("packages/py7zr", "ImportError('missing fixture py7zr')")):
+        directory = app / name
+        directory.mkdir(parents=True)
+        (directory / "__init__.py").write_text("raise " + error + "\n", encoding="utf-8")
+    system = Path(os.environ["SystemRoot"]) / "System32"
+    powershell = system / "WindowsPowerShell/v1.0/powershell.exe"
+    home = tmp_path / "local app data"
+    env = dict(os.environ, PATH=os.pathsep.join((str(Path(sys.executable).parent), str(system))),
+               LOCALAPPDATA=str(home), PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+    for name in ("SNUG_LIBRARY", "LIBARCHIVE", "SNUG_PACKAGES", "SNUG_NO_UPDATE_CHECK", "PYTHONPATH"):
+        env.pop(name, None)
+    before = {path.relative_to(app): path.read_bytes() for path in app.rglob("*") if path.is_file()}
+    result = subprocess.run([str(powershell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                             str(app / "runtime.ps1"), command, "--json"], env=env,
+                            capture_output=True, encoding="utf-8", timeout=30)
+    assert result.returncode == (2 if command == "doctor" else 0), result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report["schema_version"] == 1 and not result.stderr
+    if command == "doctor":
+        assert report["runtime"]["state"]["status"] == "corrupt"
+        assert report["ok"] is False
+    after = {path.relative_to(app): path.read_bytes() for path in app.rglob("*") if path.is_file()}
+    assert before == after and not list(home.rglob("*"))
+
+
+@windows_host
+@pytest.mark.parametrize("command", ["doctor", "formats"])
+def test_windows_diagnostics_without_python_do_not_install(tmp_path, command):
+    app = tmp_path / "Snug without Python"
+    app.mkdir()
+    shutil.copyfile(ROOT / "runtime.ps1", app / "runtime.ps1")
+    system = Path(os.environ["SystemRoot"]) / "System32"
+    powershell = system / "WindowsPowerShell/v1.0/powershell.exe"
+    before = (app / "runtime.ps1").read_bytes()
+    result = subprocess.run([str(powershell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                             str(app / "runtime.ps1"), command, "--json"], env=dict(os.environ, PATH=str(system)),
+                            capture_output=True, encoding="utf-8", timeout=30)
+    assert result.returncode == 1 and not result.stdout
+    assert "Offline diagnostics require an existing compatible Python runtime" in result.stderr
+    assert "No installation or repair was attempted" in result.stderr
+    assert list(app.iterdir()) == [app / "runtime.ps1"]
+    assert (app / "runtime.ps1").read_bytes() == before
+
+
+@windows_host
 @pytest.mark.parametrize('script_name', ['install.ps1', 'runtime.ps1'])
 def test_windows_downloads_reject_downgrades_before_following(tmp_path, script_name):
     # Extract only the helper, leaving installation/repair untouched. Custom
@@ -90,6 +165,7 @@ if ([OfflineRequest]::Calls -ne 11 -or (Test-Path $Destination)) { throw 'Redire
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@windows_host
 @pytest.mark.skipif(os.environ.get("SNUG_WINDOWS_LIVE_BOOTSTRAP") != "1",
                    reason="set SNUG_WINDOWS_LIVE_BOOTSTRAP=1 for live runtime downloads")
 def test_windows_bootstrap_password_workflow_and_deleted_dll_repair(tmp_path):
