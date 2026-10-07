@@ -986,6 +986,54 @@ class ArchiveEntry:
     mtime: float | None = None
     is_hardlink: bool = False
     size_known: bool = True
+    is_special: bool = False
+
+
+@dataclass(frozen=True)
+class ArchiveInspection:
+    entries: list[ArchiveEntry]
+    metadata: dict
+
+
+def _validate_structure(entries: Sequence[ArchiveEntry], members=None, strip: int = 0,
+                        *, symlinks: str = "store") -> None:
+    """Validate names and selected output collisions without touching disk."""
+    outputs: dict[tuple[str, ...], ArchiveEntry] = {}
+    parents: set[tuple[str, ...]] = set()
+    for entry in entries:
+        parts = _clean_parts(entry.name)
+        if entry.is_hardlink:
+            _clean_parts(entry.link_target or "")
+        if not _selected(entry.name, members):
+            continue
+        parts = parts[strip:]
+        if not parts:
+            continue
+        if entry.is_symlink and symlinks == "store" and entry.link_target is not None:
+            link = entry.link_target.replace("\\", "/")
+            if not link or link.startswith("/") or _DRIVE_RE.match(link) or "\0" in link:
+                raise UnsafeArchiveError(f"unsafe symlink target: {entry.name!r} -> {entry.link_target!r}")
+            resolved = parts[:-1].copy()
+            for part in link.split("/"):
+                if part == "..":
+                    if not resolved:
+                        raise UnsafeArchiveError(f"escaping symlink: {entry.name!r} -> {entry.link_target!r}")
+                    resolved.pop()
+                elif part not in ("", "."):
+                    _clean_parts(part)
+                    resolved.append(part)
+        key = tuple(os.path.normcase(part) for part in parts)
+        prior = outputs.get(key)
+        if prior is not None and not (prior.is_dir and entry.is_dir):
+            raise UnsafeArchiveError(f"duplicate output path in archive: {entry.name!r}")
+        for length in range(1, len(key)):
+            ancestor = outputs.get(key[:length])
+            if ancestor is not None and not ancestor.is_dir:
+                raise UnsafeArchiveError(f"member has a non-directory parent: {entry.name!r}")
+        if not entry.is_dir and key in parents:
+            raise UnsafeArchiveError(f"member replaces an archive parent: {entry.name!r}")
+        outputs[key] = entry
+        parents.update(key[:length] for length in range(1, len(key)))
 
 
 # --------------------------------------------------------------------------- #
@@ -1003,6 +1051,7 @@ class _ExtractContext:
     report: ExtractReport
     progress: ProgressSink
     budget: _ExtractionBudget = field(default_factory=_ExtractionBudget)
+    inspection: ArchiveInspection | None = None
     deferred_dirs: list[tuple[Path, int | None, float | None]] = field(default_factory=list)
     pending_outputs: list[SafeOutputFile] = field(default_factory=list)
     deferred_hardlinks: list[tuple[ArchiveEntry, Path, str | None]] = field(default_factory=list)
@@ -1221,6 +1270,7 @@ class ArchiveBackend(Protocol):
     def available(self) -> bool: ...
     def can_read(self, path: Path) -> bool: ...
     def can_write(self, fmt: ArchiveFormat) -> bool: ...
+    def inspect(self, path: Path, password=None) -> ArchiveInspection: ...
     def list_entries(self, path: Path, password=None) -> list[ArchiveEntry]: ...
     def create(self, archive_path: Path, items, fmt: ArchiveFormat,
                compresslevel, symlinks: str, report: CreateReport,
@@ -1265,24 +1315,23 @@ class NativeBackend:
                 return False
         return False
 
-    def list_entries(self, path: Path, password=None) -> list[ArchiveEntry]:
+    def inspect(self, path: Path, password=None) -> ArchiveInspection:
         fmt = _detect_by_magic(path) or _extension_format(path)
         if fmt in (ArchiveFormat.ZIP, ArchiveFormat.ZIPX):
             with zipfile.ZipFile(path) as zf:
-                return [_zip_entry(i) for i in zf.infolist()]
+                infos = zf.infolist()
+                return ArchiveInspection([_zip_entry(i) for i in infos],
+                                         {"encrypted": any(i.flag_bits & 1 for i in infos)})
         if password is not None:
             raise ArchiveError("TAR archives do not support passwords")
         with tarfile.open(path, "r:*") as tf:
-            return [_tar_entry(m) for m in tf.getmembers()]
+            return ArchiveInspection([_tar_entry(m) for m in tf.getmembers()], {"encrypted": False})
+
+    def list_entries(self, path: Path, password=None) -> list[ArchiveEntry]:
+        return self.inspect(path, password).entries
 
     def metadata(self, path: Path, password=None) -> dict:
-        fmt = _detect_by_magic(path) or _extension_format(path)
-        if fmt in (ArchiveFormat.ZIP, ArchiveFormat.ZIPX):
-            with zipfile.ZipFile(path) as zf:
-                return {"encrypted": any(i.flag_bits & 1 for i in zf.infolist())}
-        if password is not None:
-            raise ArchiveError("TAR archives do not support passwords")
-        return {"encrypted": False}
+        return self.inspect(path, password).metadata
 
     def create(self, archive_path, items, fmt, compresslevel, symlinks,
                report, progress, password=None) -> None:
@@ -1450,6 +1499,9 @@ class NativeBackend:
             return
 
         mode = info.external_attr >> 16
+        if _zip_entry(info).is_special:
+            ctx.report.skipped.append(info.filename)
+            return
         if stat.S_ISLNK(mode):
             self._extract_zip_symlink(zf, info, target, ctx, password)
             return
@@ -1563,11 +1615,12 @@ class NativeBackend:
 def _zip_entry(info: zipfile.ZipInfo) -> ArchiveEntry:
     mode = info.external_attr >> 16
     return ArchiveEntry(
-        name=info.filename,
+        name=info.orig_filename,
         size=info.file_size,
         compressed_size=info.compress_size,
         is_dir=info.is_dir() or stat.S_ISDIR(mode),
         is_symlink=stat.S_ISLNK(mode),
+        is_special=bool(stat.S_IFMT(mode)) and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)),
         mode=stat.S_IMODE(mode) if mode else None,
         mtime=_zip_mtime(info),
     )
@@ -1580,6 +1633,7 @@ def _tar_entry(member: tarfile.TarInfo) -> ArchiveEntry:
         is_dir=member.isdir(),
         is_symlink=member.issym(),
         is_hardlink=member.islnk(),
+        is_special=not (member.isreg() or member.isdir() or member.issym() or member.islnk()),
         link_target=member.linkname or None,
         mode=stat.S_IMODE(member.mode),
         mtime=float(member.mtime),
@@ -1637,25 +1691,26 @@ class StreamBackend:
                 return name[:-len(suffix)] or "decompressed"
         return name + ".out"
 
-    def list_entries(self, path: Path, password=None) -> list[ArchiveEntry]:
+    def inspect(self, path: Path, password=None, *, streaming: bool = False) -> ArchiveInspection:
         if password is not None:
             raise ArchiveError("standalone compression streams do not support passwords")
         fmt = detect_format(path)
         size = 0
-        with self._open(path, fmt, "rb") as src:
-            while True:
-                buf = src.read(CHUNK_SIZE)
-                if not buf:
-                    break
-                size += len(buf)
-        return [ArchiveEntry(self._name(path), size=size, compressed_size=path.stat().st_size)]
+        if not streaming:
+            with self._open(path, fmt, "rb") as src:
+                while True:
+                    buf = src.read(CHUNK_SIZE)
+                    if not buf:
+                        break
+                    size += len(buf)
+        return ArchiveInspection([ArchiveEntry(self._name(path), size=size,
+            compressed_size=path.stat().st_size, size_known=not streaming)], {"encrypted": False})
+
+    def list_entries(self, path: Path, password=None) -> list[ArchiveEntry]:
+        return self.inspect(path, password).entries
 
     def metadata(self, path: Path, password=None) -> dict:
-        if password is not None:
-            raise ArchiveError("standalone compression streams do not support passwords")
-        if not self.can_read(path):
-            raise FormatError(f"not a standalone compression stream: {path.name!r}")
-        return {"encrypted": False}
+        return self.inspect(path, password).metadata
 
     def create(self, archive_path, items, fmt, compresslevel, symlinks,
                report, progress, password=None) -> None:
@@ -1679,8 +1734,8 @@ class StreamBackend:
         if password is not None:
             raise ArchiveError("standalone compression streams do not support passwords")
         # Unknown decoded size avoids a redundant unbounded preflight decode.
-        entry = ArchiveEntry(self._name(archive_path), compressed_size=archive_path.stat().st_size,
-                             size_known=False)
+        inspection = ctx.inspection or self.inspect(archive_path, password, streaming=True)
+        entry = inspection.entries[0]
         if not _selected(entry.name, ctx.members):
             ctx.progress.start(0, 0)
             return
@@ -1774,22 +1829,26 @@ class ArchiveEngine:
                 zipfile.BadZipFile, tarfile.TarError, lzma.LZMAError, zlib.error) as exc:
             raise ArchiveError(str(exc)) from exc
 
-    def list_entries(self, archive, password=None) -> list[ArchiveEntry]:
+    def inspect(self, archive, password=None) -> ArchiveInspection:
         path = self._archive_path(archive)
         with self._operation():
             fmt = detect_format(path)
-            return self._read_backend(path, fmt).list_entries(path, password=password)
+            return self._read_backend(path, fmt).inspect(path, password=password)
+
+    def list_entries(self, archive, password=None) -> list[ArchiveEntry]:
+        return self.inspect(archive, password).entries
 
     def info(self, archive, password=None) -> dict:
         path = self._archive_path(archive)
         with self._operation():
             fmt = detect_format(path)
             backend = self._read_backend(path, fmt)
-            entries = backend.list_entries(path, password=password)
+            inspection = backend.inspect(path, password=password)
+            entries = inspection.entries
             info = {
                 "path": str(path), "format": fmt.value, "backend": backend.name,
                 "archive_size": path.stat().st_size, "entries": len(entries),
-                "files": sum(1 for e in entries if not e.is_dir and not e.is_symlink),
+                "files": sum(1 for e in entries if not e.is_dir and not e.is_symlink and not e.is_special),
                 "directories": sum(1 for e in entries if e.is_dir),
                 "symlinks": sum(1 for e in entries if e.is_symlink),
                 "uncompressed_size": sum(e.size for e in entries if not e.is_dir),
@@ -1797,7 +1856,7 @@ class ArchiveEngine:
                 "can_create": any(b.available() and b.can_write(fmt) for b in self.backends),
             }
             # Backends supply only metadata actually established by their APIs.
-            info.update({key: value for key, value in backend.metadata(path, password=password).items()
+            info.update({key: value for key, value in inspection.metadata.items()
                          if key not in info})
             return info
 
@@ -1876,17 +1935,18 @@ class ArchiveEngine:
             selected_members = set(members) if isinstance(members, (list, tuple, set, frozenset)) else members
             budget = _ExtractionBudget(limits)
             if isinstance(backend, StreamBackend):
-                entries = [ArchiveEntry(backend._name(path), compressed_size=path.stat().st_size,
-                                        size_known=False)]
+                inspection = backend.inspect(path, password, streaming=True)
             else:
-                entries = backend.list_entries(path, password=password)
+                inspection = backend.inspect(path, password=password)
+            entries = inspection.entries
+            _validate_structure(entries, selected_members, strip_components, symlinks=symlinks)
             budget.preflight([entry for entry in entries if _selected(entry.name, selected_members)])
             dest = Path(destination)
             dest.mkdir(parents=True, exist_ok=True)
             report = ExtractReport(archive=path, destination=dest)
             ctx = _ExtractContext(
                 dest_real=Path(os.path.realpath(dest)),
-                members=selected_members, budget=budget,
+                members=selected_members, budget=budget, inspection=inspection,
                 overwrite=overwrite, preserve_metadata=preserve_metadata,
                 symlinks=symlinks, strip=strip_components, report=report, progress=progress)
             start = time.monotonic()
