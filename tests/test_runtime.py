@@ -293,7 +293,7 @@ def test_brew_environment_is_reused_and_rediscovered_after_upgrade(brew_app):
     shutil.rmtree(Path(env['SNUG_TEST_BREW_ROOT']) / 'v1')
     result = launch(app, env, '--version')
     assert result.returncode == 0, result.stderr
-    assert '1.8.0' in result.stdout
+    assert '1.9.0' in result.stdout
     assert not log.exists()
     assert not (app / 'venv').exists()
 
@@ -371,7 +371,7 @@ fi
     checked = subprocess.run([str(prefix / 'bin/snug'), '--version'], env=env,
                              capture_output=True, text=True, timeout=30)
     assert checked.returncode == 0, checked.stderr
-    assert checked.stdout.strip() == 'snug 1.8.0'
+    assert checked.stdout.strip() == 'snug 1.9.0'
     assert not log.exists()
     assert not (prefix / 'share/.snug.update-lock').exists()
     assert not list((prefix / 'share').glob('.snug-install*'))

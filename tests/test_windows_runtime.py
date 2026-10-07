@@ -190,7 +190,7 @@ def test_windows_bootstrap_password_workflow_and_deleted_dll_repair(tmp_path):
                               capture_output=True, encoding="utf-8", timeout=240)
     version = run("--version")
     assert version.returncode == 0, version.stderr
-    assert "snug 1.8.0" in version.stdout
+    assert "snug 1.9.0" in version.stdout
     assert (app / "python/python.exe").is_file()
     assert not list(app.rglob("pip"))
     assert not list(app.glob(".repair-*"))

@@ -28,7 +28,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Literal, Protocol, Sequence
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 CHUNK_SIZE = 1 << 20      # 1 MiB
 _TTY_REFRESH = 0.1        # seconds between progress redraws
