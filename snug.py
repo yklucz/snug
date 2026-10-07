@@ -1004,6 +1004,71 @@ def _display_picked_sources(sources: list[Path], origin: Path) -> None:
     print()
 
 
+def _menu_password(current: str | None) -> str | None:
+    """Use the CLI's secure password inputs without displaying their value."""
+    choice = _select_menu("Archive password", [
+        ("p", "Prompt securely"),
+        ("f", "Read a password file"),
+        ("n", "Clear password"),
+        ("b", "Back"),
+    ])
+    if choice == "p":
+        return _read_password(argparse.Namespace(password=True, password_file=None))
+    if choice == "f":
+        _clear_screen()
+        path = _prompt("Password file")
+        if path:
+            return _read_password(argparse.Namespace(password=False, password_file=Path(path)))
+    if choice == "n":
+        return None
+    return current
+
+
+@contextmanager
+def _menu_password_errors(password: str | None):
+    """Do not expose a password if an optional backend includes it in an error."""
+    try:
+        yield
+    except (ArchiveError, OSError, ValueError) as exc:
+        if password and password in str(exc):
+            message = str(exc).replace(password, "[redacted]")
+            if isinstance(exc, ArchiveError):
+                raise type(exc)(message) from None
+            raise ArchiveError(message) from None
+        raise
+
+
+def _menu_format_path(path: Path, fmt: ArchiveFormat) -> Path:
+    """Keep the output's usual suffix aligned with the selected writer."""
+    name = path.name
+    for suffix in _ARCHIVE_SUFFIXES:
+        if name.lower().endswith(suffix):
+            name = name[:-len(suffix)]
+            break
+    return path.with_name(name + "." + fmt.value)
+
+
+def _menu_compression(current: int | None) -> int | None:
+    _clear_screen()
+    while True:
+        raw = _prompt("Compression level (0-9 or default)",
+                      "default" if current is None else str(current))
+        if raw.lower() == "default":
+            return None
+        if raw.isascii() and raw.isdecimal() and 0 <= int(raw) <= 9:
+            return int(raw)
+        print("  Enter a compression level from 0 to 9, or default.")
+
+
+def _menu_compression_supported(fmt: ArchiveFormat) -> bool:
+    return fmt not in (ArchiveFormat.TAR, ArchiveFormat.CPIO, ArchiveFormat.AR)
+
+
+def _menu_password_supported(archive: Path) -> bool:
+    return detect_format(archive) in (ArchiveFormat.ZIP, ArchiveFormat.ZIPX,
+                                      ArchiveFormat.SEVEN_ZIP)
+
+
 def _menu_create(engine: ArchiveEngine) -> None:
     cwd = Path.cwd()
     sources = _select_sources_arrow(cwd)
@@ -1012,35 +1077,90 @@ def _menu_create(engine: ArchiveEngine) -> None:
         print("\n  No sources selected; cancelled.")
         return
 
-    _display_picked_sources(sources, cwd)
-
     supported = engine.writable_formats()
-    print("  Writable formats: " + ", ".join(f.value for f in supported))
+    if not supported:
+        raise FormatError("no archive writers are available")
+    fmt = ArchiveFormat.TAR_GZ if ArchiveFormat.TAR_GZ in supported else supported[0]
+    archive_path = cwd / ("archive." + fmt.value)
+    compresslevel: int | None = None
+    password: str | None = None
+    symlinks = "store"
+    while True:
+        shown_sources = ", ".join(_safe(str(path)) for path in sources)
+        choice = _select_menu("Create archive options", [
+            ("s", f"Sources: {len(sources)} selected — {shown_sources}"),
+            ("o", f"Output: {_safe(archive_path)}"),
+            ("f", f"Format: {fmt.value}"),
+            ("l", (f"Compression: {'default' if compresslevel is None else compresslevel}"
+                   if _menu_compression_supported(fmt) else "Compression: unavailable for this writer")),
+            ("p", (f"Password: {'set' if password is not None else 'none'}"
+                   if fmt is ArchiveFormat.SEVEN_ZIP else "Password: unavailable for this writer")),
+            ("y", f"Symlinks: {symlinks}"),
+            ("r", "Create archive"),
+            ("b", "Back"),
+        ], subtitle=str(cwd))
+        if choice is None or choice == "b":
+            return
+        if choice == "s":
+            picked = _select_sources_arrow(cwd)
+            if picked:
+                sources = picked
+        elif choice == "o":
+            _clear_screen()
+            raw = _prompt("Output archive", str(archive_path))
+            candidate = cwd / raw
+            if candidate.name.lower().endswith(_ARCHIVE_SUFFIXES):
+                candidate_format = detect_format(candidate, for_write=True)
+                if candidate_format not in supported:
+                    raise FormatError(f"cannot create {candidate_format.value}; choose an installed writer")
+                fmt = candidate_format
+                if fmt is not ArchiveFormat.SEVEN_ZIP:
+                    password = None
+                if not _menu_compression_supported(fmt):
+                    compresslevel = None
+                archive_path = candidate
+            else:
+                archive_path = _menu_format_path(candidate, fmt)
+        elif choice == "f":
+            formats = [(str(index), value.value) for index, value in enumerate(supported, 1)]
+            formats.append(("b", "Back"))
+            selected = _select_menu("Choose an installed writer", formats)
+            if selected is not None and selected != "b":
+                fmt = supported[int(selected) - 1]
+                if fmt is not ArchiveFormat.SEVEN_ZIP:
+                    password = None
+                if not _menu_compression_supported(fmt):
+                    compresslevel = None
+                archive_path = _menu_format_path(archive_path, fmt)
+        elif choice == "l":
+            if _menu_compression_supported(fmt):
+                compresslevel = _menu_compression(compresslevel)
+            else:
+                _clear_screen()
+                print("  This writer does not support a compression level.")
+                _wait_for_enter()
+        elif choice == "p":
+            if fmt is ArchiveFormat.SEVEN_ZIP:
+                password = _menu_password(password)
+            else:
+                _clear_screen()
+                print("  Password-protected creation requires an installed 7z writer.")
+                _wait_for_enter()
+        elif choice == "y":
+            selected = _select_menu("Symlink policy", [
+                ("s", "Store links"), ("f", "Follow links"),
+                ("k", "Skip links"), ("b", "Back"),
+            ])
+            symlinks = {"s": "store", "f": "follow", "k": "skip"}.get(selected or "", symlinks)
+        elif choice == "r":
+            break
 
-    archive_name = _prompt("Archive name", "archive.tar.gz")
-    if not archive_name:
-        print("  No archive name given; cancelled.")
-        return
-    archive_name = _ensure_archive_suffix(archive_name)
-    archive_path = cwd / archive_name
-    # The menu keeps its existing name prompt and offers only installed writers.
-    fmt = detect_format(archive_path, for_write=True)
-    if fmt not in supported:
-        available = ", ".join(f.value for f in supported)
-        raise FormatError(f"cannot create {fmt.value}; writable formats: {available}")
     if archive_path.exists():
-        answer = _prompt(f"{archive_name} exists. Overwrite? (y/N)", "n").lower()
+        _clear_screen()
+        answer = _prompt(f"{archive_path} exists. Overwrite? (y/N)", "n").lower()
         if answer not in ("y", "yes"):
             print("  Cancelled; existing archive was not changed.")
             return
-
-    level_raw = _prompt("Compression level (0-9, blank for default)", "")
-    compresslevel: int | None = None
-    if level_raw:
-        try:
-            compresslevel = max(0, min(9, int(level_raw)))
-        except ValueError:
-            print(f"  Ignoring non-numeric level {level_raw!r}.")
 
     _clear_screen()
     print()
@@ -1049,7 +1169,7 @@ def _menu_create(engine: ArchiveEngine) -> None:
         precollected = _interactive_enumerate(
             sources,
             root=cwd,
-            symlinks="store",
+            symlinks=symlinks,
             archive_real=archive_real,
         )
     except KeyboardInterrupt:
@@ -1063,19 +1183,87 @@ def _menu_create(engine: ArchiveEngine) -> None:
 
     print()
     display = ProgressDisplay("create")
-    report = engine.create(
-        archive_path,
-        sources,
-        root=cwd,
-        compresslevel=compresslevel,
-        progress=display,
-        precollected=precollected,
-    )
+    with _menu_password_errors(password):
+        report = engine.create(
+            archive_path,
+            sources,
+            fmt=fmt,
+            root=cwd,
+            compresslevel=compresslevel,
+            symlinks=symlinks,
+            password=password,
+            progress=display,
+            precollected=precollected,
+        )
     print()
     _print_create_summary(report)
     if report.skipped:
         for name in report.skipped:
             print(f"  skipped: {_safe(name)}", file=sys.stderr)
+
+
+def _menu_members(engine: ArchiveEngine, archive: Path, password: str | None,
+                  current: list[str] | None) -> list[str] | None:
+    with _menu_password_errors(password):
+        entries = engine.inspect(archive, password=password).entries
+    names = list(dict.fromkeys(entry.name for entry in entries))
+    selected = set(names if current is None else current)
+    while True:
+        options = [
+            ("a", "Select all members"), ("n", "Select no members"),
+            ("r", "Use this selection"), ("b", "Back"),
+        ]
+        options.extend((str(index), f"[{'x' if name in selected else ' '}] {_safe(name)}")
+                       for index, name in enumerate(names, 1))
+        choice = _select_menu("Choose exact archive members", options)
+        if choice is None or choice == "b":
+            return current
+        if choice == "r":
+            return None if selected == set(names) else [name for name in names if name in selected]
+        if choice == "a":
+            selected = set(names)
+        elif choice == "n":
+            selected.clear()
+        else:
+            name = names[int(choice) - 1]
+            if name in selected:
+                selected.remove(name)
+            else:
+                selected.add(name)
+
+
+def _menu_limits(current: ExtractionLimits) -> ExtractionLimits:
+    entries, total, per_file, ratio = (current.max_entries, current.max_total_size,
+                                      current.max_file_size, current.max_ratio)
+    while True:
+        def shown(value: int | float | None) -> str:
+            return "none" if value is None else str(value)
+
+        choice = _select_menu("Extraction limits", [
+            ("e", f"Selected entries: {shown(entries)}"),
+            ("s", f"Total decoded bytes: {shown(total)}"),
+            ("f", f"Decoded bytes per member: {shown(per_file)}"),
+            ("r", f"Compression ratio: {shown(ratio)}"),
+            ("b", "Use these limits"),
+        ], subtitle="No limits by default. K/KB are decimal; KiB is binary. Enter none to clear.")
+        if choice is None or choice == "b":
+            return ExtractionLimits(entries, total, per_file, ratio)
+        _clear_screen()
+        old = {"e": entries, "s": total, "f": per_file, "r": ratio}[choice]
+        while True:
+            raw = _prompt("Limit (or none)", shown(old))
+            try:
+                if choice == "e":
+                    entries = None if raw.lower() == "none" else _parse_count(raw)
+                elif choice == "s":
+                    total = None if raw.lower() == "none" else parse_size(raw)
+                elif choice == "f":
+                    per_file = None if raw.lower() == "none" else parse_size(raw)
+                elif choice == "r":
+                    ratio = None if raw.lower() == "none" else _parse_ratio(raw)
+                break
+            except (ValueError, argparse.ArgumentTypeError) as exc:
+                print(f"  {_safe(exc)}")
 
 
 def _menu_extract(engine: ArchiveEngine) -> None:
@@ -1085,15 +1273,108 @@ def _menu_extract(engine: ArchiveEngine) -> None:
         print("\n  Cancelled.")
         return
 
+    destination = "."
+    members: list[str] | None = None
+    overwrite, metadata = True, True
+    symlinks = "store"
+    strip_components = 0
+    password: str | None = None
+    password_supported = _menu_password_supported(archive)
+    limits = ExtractionLimits()
+    while True:
+        limited = any(value is not None for value in
+                      (limits.max_entries, limits.max_total_size, limits.max_file_size, limits.max_ratio))
+        choice = _select_menu("Extract archive options", [
+            ("d", f"Destination: {_safe(destination)}"),
+            ("m", "Members: all" if members is None else f"Members: {len(members)} exact member(s)"),
+            ("o", f"Overwrite: {'yes' if overwrite else 'no'}"),
+            ("t", f"Metadata: {'preserve' if metadata else 'skip'}"),
+            ("y", f"Symlinks: {symlinks}"),
+            ("s", f"Strip components: {strip_components}"),
+            ("p", (f"Password: {'set' if password is not None else 'none'}"
+                   if password_supported else "Password: unavailable for this format")),
+            ("l", f"Limits: {'set' if limited else 'none'}"),
+            ("r", "Extract archive"), ("b", "Back"),
+        ], subtitle=str(archive))
+        if choice is None or choice == "b":
+            return
+        if choice == "d":
+            _clear_screen()
+            destination = _prompt("Destination directory", destination)
+        elif choice == "m":
+            members = _menu_members(engine, archive, password, members)
+        elif choice == "o":
+            overwrite = not overwrite
+        elif choice == "t":
+            metadata = not metadata
+        elif choice == "y":
+            symlinks = "skip" if symlinks == "store" else "store"
+        elif choice == "s":
+            _clear_screen()
+            while True:
+                try:
+                    strip_components = _parse_count(_prompt("Strip components", str(strip_components)))
+                    break
+                except argparse.ArgumentTypeError as exc:
+                    print(f"  {_safe(exc)}")
+        elif choice == "p":
+            if password_supported:
+                password = _menu_password(password)
+            else:
+                _clear_screen()
+                print("  This format does not support passwords in Snug.")
+                _wait_for_enter()
+        elif choice == "l":
+            limits = _menu_limits(limits)
+        elif choice == "r":
+            if members == []:
+                print("  No members selected; cancelled.")
+                return
+            break
+
     _clear_screen()
-    print(f"\n  Extracting {_safe(archive.name)} into the current directory…\n")
+    print(f"\n  Extracting {_safe(archive.name)} into {_safe(destination)}…\n")
     display = ProgressDisplay("extract")
-    report = engine.extract(archive, ".", progress=display)
+    with _menu_password_errors(password):
+        report = engine.extract(archive, destination, members=members, overwrite=overwrite,
+                                preserve_metadata=metadata, symlinks=symlinks,
+                                strip_components=strip_components, password=password,
+                                limits=limits, progress=display)
     print()
     _print_extract_summary(report)
     if report.skipped:
         for name in report.skipped:
             print(f"  skipped: {_safe(name)}", file=sys.stderr)
+
+
+def _menu_test(engine: ArchiveEngine) -> None:
+    archive = _select_archive()
+    if archive is None:
+        return
+    password: str | None = None
+    password_supported = _menu_password_supported(archive)
+    while True:
+        choice = _select_menu("Test archive integrity", [
+            ("p", (f"Password: {'set' if password is not None else 'none'}"
+                   if password_supported else "Password: unavailable for this format")),
+            ("r", "Test archive"), ("b", "Back"),
+        ], subtitle=str(archive))
+        if choice is None or choice == "b":
+            return
+        if choice == "p":
+            if password_supported:
+                password = _menu_password(password)
+            else:
+                _clear_screen()
+                print("  This format does not support passwords in Snug.")
+                _wait_for_enter()
+        elif choice == "r":
+            break
+    _clear_screen()
+    with _menu_password_errors(password):
+        report = engine.test(archive, password=password, progress=ProgressDisplay("test"))
+    print()
+    _print_test_summary(report)
 
 
 def _menu_list(engine: ArchiveEngine) -> None:
@@ -1138,6 +1419,7 @@ _MENU_OPTIONS: list[tuple[str, str]] = [
     ("2", "Extract an archive"),
     ("3", "List archive contents"),
     ("4", "Show archive info"),
+    ("5", "Test archive integrity"),
     ("0", "Quit"),
 ]
 
@@ -1146,6 +1428,7 @@ _MENU_HANDLERS: dict[str, Callable[[ArchiveEngine], None]] = {
     "2": _menu_extract,
     "3": _menu_list,
     "4": _menu_info,
+    "5": _menu_test,
 }
 
 
