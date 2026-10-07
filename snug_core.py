@@ -974,6 +974,16 @@ class ExtractReport:
         return self.bytes_written / self.elapsed if self.elapsed > 0 else 0.0
 
 
+@dataclass
+class TestReport:
+    archive: Path
+    format: ArchiveFormat
+    entries: int = 0
+    files: int = 0
+    bytes_read: int = 0
+    elapsed: float = 0.0
+
+
 @dataclass(frozen=True)
 class ArchiveEntry:
     name: str
@@ -1276,6 +1286,8 @@ class ArchiveBackend(Protocol):
                compresslevel, symlinks: str, report: CreateReport,
                progress: ProgressSink, password=None) -> None: ...
     def extract(self, archive_path: Path, ctx: _ExtractContext, password=None) -> None: ...
+    def test(self, path: Path, inspection: ArchiveInspection, progress: ProgressSink,
+             password=None) -> int: ...
     def metadata(self, path: Path, password=None) -> dict: ...
 
 
@@ -1332,6 +1344,53 @@ class NativeBackend:
 
     def metadata(self, path: Path, password=None) -> dict:
         return self.inspect(path, password).metadata
+
+    def test(self, path: Path, inspection: ArchiveInspection, progress: ProgressSink,
+             password=None) -> int:
+        total = 0
+        fmt = detect_format(path)
+        if fmt in (ArchiveFormat.ZIP, ArchiveFormat.ZIPX):
+            with zipfile.ZipFile(path) as archive:
+                for info in archive.infolist():
+                    entry = _zip_entry(info)
+                    progress.item(entry.name)
+                    if entry.is_dir or entry.is_special:
+                        continue
+                    try:
+                        with archive.open(info, pwd=_password_bytes(password)) as source:
+                            total += _test_chunks(entry, _read_chunks(source), progress)
+                    except ArchiveError:
+                        raise
+                    except Exception as exc:
+                        raise ArchiveError(f"member {entry.name!r}: {exc}") from exc
+            return total
+        if password is not None:
+            raise ArchiveError("TAR archives do not support passwords")
+        last = path.name
+        with tarfile.open(path, "r:*") as archive:
+            for member in archive:
+                entry = _tar_entry(member)
+                last = entry.name
+                progress.item(entry.name)
+                if not member.isfile():
+                    continue
+                try:
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise ArchiveError(f"unreadable member: {entry.name!r}")
+                    with source:
+                        total += _test_chunks(entry, _read_chunks(source), progress)
+                except ArchiveError:
+                    raise
+                except Exception as exc:
+                    raise ArchiveError(f"member {entry.name!r}: {exc}") from exc
+            if isinstance(archive.fileobj, (gzip.GzipFile, bz2.BZ2File, lzma.LZMAFile)):
+                try:
+                    while archive.fileobj.read(CHUNK_SIZE):
+                        pass
+                except Exception as exc:
+                    raise ArchiveError(f"member {last!r}, compressed TAR trailer: {exc}") from exc
+        return total
 
     def create(self, archive_path, items, fmt, compresslevel, symlinks,
                report, progress, password=None) -> None:
@@ -1639,6 +1698,38 @@ def _tar_entry(member: tarfile.TarInfo) -> ArchiveEntry:
         mtime=float(member.mtime),
     )
 
+
+def _read_chunks(source) -> Iterable[bytes]:
+    while True:
+        chunk = source.read(CHUNK_SIZE)
+        if not chunk:
+            return
+        yield chunk
+
+
+def _test_chunks(entry: ArchiveEntry, chunks: Iterable[bytes], progress: ProgressSink) -> int:
+    """Consume bounded payload chunks and validate size and stored link targets."""
+    count = 0
+    link = bytearray() if entry.is_symlink else None
+    try:
+        for chunk in chunks:
+            count += len(chunk)
+            progress.chunk(len(chunk))
+            if link is not None:
+                if count > 65536:
+                    raise UnsafeArchiveError(f"symlink target is too large: {entry.name!r}")
+                link.extend(chunk)
+        if entry.size_known and count != entry.size:
+            raise ArchiveError(f"member {entry.name!r}: expected {entry.size} bytes, read {count}")
+        if link is not None:
+            from dataclasses import replace
+            _validate_structure([replace(entry, link_target=link.decode("utf-8", "surrogateescape"))])
+        return count
+    except ArchiveError:
+        raise
+    except Exception as exc:
+        raise ArchiveError(f"member {entry.name!r}: {exc}") from exc
+
 # --------------------------------------------------------------------------- #
 #  Standalone compression streams
 # --------------------------------------------------------------------------- #
@@ -1711,6 +1802,20 @@ class StreamBackend:
 
     def metadata(self, path: Path, password=None) -> dict:
         return self.inspect(path, password).metadata
+
+    def test(self, path: Path, inspection: ArchiveInspection, progress: ProgressSink,
+             password=None) -> int:
+        if password is not None:
+            raise ArchiveError("standalone compression streams do not support passwords")
+        entry = inspection.entries[0]
+        progress.item(entry.name)
+        try:
+            with self._open(path, detect_format(path), "rb") as source:
+                return _test_chunks(entry, _read_chunks(source), progress)
+        except ArchiveError:
+            raise
+        except Exception as exc:
+            raise ArchiveError(f"member {entry.name!r}: {exc}") from exc
 
     def create(self, archive_path, items, fmt, compresslevel, symlinks,
                report, progress, password=None) -> None:
@@ -1859,6 +1964,27 @@ class ArchiveEngine:
             info.update({key: value for key, value in inspection.metadata.items()
                          if key not in info})
             return info
+
+    def test(self, archive, *, password=None, progress: ProgressSink | None = None) -> TestReport:
+        path = self._archive_path(archive)
+        progress = progress or NullProgress()
+        start = time.monotonic()
+        with self._operation():
+            fmt = detect_format(path)
+            backend = self._read_backend(path, fmt)
+            inspection = (backend.inspect(path, password, streaming=True) if isinstance(backend, StreamBackend)
+                          else backend.inspect(path, password=password))
+            entries = inspection.entries
+            _validate_structure(entries)
+            payload = [entry for entry in entries if not (entry.is_dir or entry.is_hardlink or entry.is_special)]
+            progress.start(sum(entry.size for entry in payload) if all(entry.size_known for entry in payload) else 0,
+                           len(entries))
+            report = TestReport(path, fmt, entries=len(entries),
+                files=sum(1 for entry in payload if not entry.is_symlink))
+            report.bytes_read = backend.test(path, inspection, progress, password=password)
+            report.elapsed = time.monotonic() - start
+            progress.done()
+            return report
 
     @staticmethod
     def _collect_items(sources, *, root, symlinks: str, archive_real: str):

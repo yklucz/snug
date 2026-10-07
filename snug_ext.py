@@ -18,7 +18,8 @@ from typing import Any, Iterable, NoReturn, cast
 from snug_core import (
     ArchiveEntry, ArchiveError, ArchiveFormat, ArchiveInspection, CHUNK_SIZE, CreateReport,
     ProgressSink, SafeOutputFile, UnsafeArchiveError, _ExtractContext,
-    _extract_entry, _prepare_target, _resolve_member,
+    _clean_parts, _extract_entry, _prepare_target, _resolve_member, _test_chunks,
+    _validate_structure,
     _selected, _detect_by_magic,
 )
 
@@ -228,6 +229,33 @@ class LibarchiveBackend:
 
     def metadata(self, path: Path, password: str | None = None) -> dict:
         return self.inspect(path, password).metadata
+
+    def test(self, path: Path, inspection: ArchiveInspection, progress: ProgressSink,
+             password: str | None = None) -> int:
+        library = self._library()
+        if inspection.metadata.get("format") in ("rar", "rar5") and inspection.metadata.get("encrypted"):
+            raise ArchiveError("encrypted RAR integrity testing is not supported by the installed libarchive backend")
+        count = 0
+        current_name = path.name
+        actual_entries: list[ArchiveEntry] = []
+        try:
+            with library.file_reader(str(path), passphrase=password) as reader:
+                for raw in reader:
+                    entry = self._entry(raw)
+                    actual_entries.append(entry)
+                    current_name = entry.name
+                    progress.item(entry.name)
+                    if raw.isreg and not entry.is_hardlink:
+                        count += _test_chunks(entry, self._entry_chunks(
+                            raw, raw.size, trim_padding=inspection.metadata.get("format") == "warc"), progress)
+            _validate_structure(actual_entries)
+            return count
+        except ArchiveError as exc:
+            if password and password in str(exc):
+                raise type(exc)(_error_text(exc, password)) from exc
+            raise
+        except Exception as exc:
+            raise ArchiveError(f"member {current_name!r}: libarchive could not verify payload: {_error_text(exc, password)}") from exc
 
     def extract(self, path: Path, ctx: _ExtractContext, password: str | None = None) -> None:
         library = self._library()
@@ -510,6 +538,56 @@ class _SevenZipWriters:
                     product.close()
 
 
+class _IntegrityWriter:
+    """A counting null sink; only symbolic-link targets need a small buffer."""
+
+    def __init__(self, entry: ArchiveEntry, progress: ProgressSink):
+        self.entry, self.progress = entry, progress
+        self.length = 0
+        self.completed = False
+        self.link = bytearray() if entry.is_symlink else None
+
+    def write(self, data: bytes | bytearray) -> int:
+        if self.completed:
+            raise ArchiveError(f"member {self.entry.name!r}: integrity writer is closed")
+        self.length += len(data)
+        if self.entry.size_known and self.length > self.entry.size:
+            raise ArchiveError(f"member {self.entry.name!r}: payload exceeds its declared size")
+        if self.link is not None:
+            if self.length > 65536:
+                raise UnsafeArchiveError(f"symlink target is too large: {self.entry.name!r}")
+            self.link.extend(data)
+        self.progress.chunk(len(data))
+        return len(data)
+
+    def read(self, size: int | None = None) -> bytes:
+        return b""
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        if offset != 0 or whence != 0:
+            raise ArchiveError(f"member {self.entry.name!r}: unexpected integrity-writer seek")
+        return 0
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        if self.completed:
+            return
+        if self.entry.size_known and self.length != self.entry.size:
+            raise ArchiveError(f"member {self.entry.name!r}: expected {self.entry.size} bytes, read {self.length}")
+        if self.link is not None:
+            try:
+                target = self.link.decode("utf-8")
+            except UnicodeError as exc:
+                raise ArchiveError(f"member {self.entry.name!r}: invalid UTF-8 symbolic-link target") from exc
+            _validate_structure([replace(self.entry, link_target=target)])
+        self.completed = True
+
+    def size(self) -> int:
+        return self.length
+
+
 class SevenZipBackend:
     """7z read/write support with a safe streaming writer factory."""
 
@@ -563,6 +641,7 @@ class SevenZipBackend:
                 compressed_size=None if getattr(getattr(raw, "folder", None), "solid", False)
                 else raw.compressed, is_dir=raw.is_directory,
                 is_symlink=raw.is_symlink, mode=properties.get("posix_mode"), mtime=mtime,
+                is_special=bool(getattr(raw, "is_socket", False) or getattr(raw, "is_junction", False)),
             ))
         return result
 
@@ -593,6 +672,65 @@ class SevenZipBackend:
 
     def metadata(self, path: Path, password: str | None = None) -> dict:
         return self.inspect(path, password).metadata
+
+    def test(self, path: Path, inspection: ArchiveInspection, progress: ProgressSink,
+             password: str | None = None) -> int:
+        library = self._library()
+        factory = None
+        try:
+            with path.open("rb") as source, library.SevenZipFile(source, "r", password=password) as archive:
+                if archive.needs_password() and password is None:
+                    raise ArchiveError("7z archive requires a password; use --password or --password-file")
+                entries = self._entries(archive)
+                _validate_structure(entries)
+                for raw, entry in zip(archive.files, entries):
+                    if getattr(raw, "is_junction", False):
+                        raise ArchiveError(f"7z junction integrity testing is unsupported: {entry.name!r}")
+                    if entry.is_dir or entry.is_special:
+                        progress.item(entry.name)
+                payload = [entry for entry in entries if not (entry.is_dir or entry.is_special or entry.is_hardlink)]
+                factory = self._test_factory(library, payload, progress)
+                if payload:
+                    archive.extract(targets=[entry.name for entry in payload], recursive=False, factory=factory)
+            return factory.finish()
+        except Exception as exc:
+            try:
+                self._raise_error(exc, password)
+            except ArchiveError as error:
+                name = factory.current_name if factory is not None else None
+                if name and not isinstance(error, UnsafeArchiveError) and not str(error).startswith("member "):
+                    message = f"member {name!r}: {_error_text(error, password)}"
+                    raise ArchiveError(_error_text(ArchiveError(message), password)) from exc
+                raise
+
+    @staticmethod
+    def _test_factory(library, entries: list[ArchiveEntry], progress: ProgressSink):
+        by_name = {"/".join(_clean_parts(entry.name)): entry for entry in entries}
+        products: dict[str, _IntegrityWriter] = {}
+
+        class NullFactory(library.io.WriterFactory):
+            current_name: str | None = None
+
+            def create(self, filename: str):
+                canonical = "/".join(_clean_parts(filename))
+                entry = by_name.get(canonical)
+                if entry is None or canonical in products:
+                    raise UnsafeArchiveError(f"unexpected 7z integrity output name: {filename!r}")
+                progress.item(entry.name)
+                self.current_name = entry.name
+                product = _IntegrityWriter(entry, progress)
+                products[canonical] = product
+                return product
+
+            def finish(self) -> int:
+                for name, entry in by_name.items():
+                    product = products.get(name)
+                    if product is None:
+                        raise ArchiveError(f"member {entry.name!r}: payload was not decoded")
+                    product.close()
+                return sum(product.length for product in products.values())
+
+        return NullFactory()
 
     def create(self, path: Path, items: list[tuple[Path, str]], fmt: ArchiveFormat,
                compresslevel: int | None, symlinks: str, report: CreateReport,

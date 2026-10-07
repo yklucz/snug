@@ -2,7 +2,7 @@
 """Snug — a lightweight Python CLI archive manager with live speed and ETA.
 
 Run without arguments for the existing interactive terminal interface, or use
-create, extract, list, info and update. Archive I/O and safety live in snug_core;
+create, extract, list, info, test and update. Archive I/O and safety live in snug_core;
 optional broad-format and 7z implementations live in snug_ext.
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 from snug_core import (
     ArchiveEngine, ArchiveEntry, ArchiveError, ArchiveFormat, CreateReport,
-    ExtractReport, ExtractionLimits, ResourceLimitError, parse_size,
+    ExtractReport, TestReport, ExtractionLimits, ResourceLimitError, parse_size,
     FormatError, NativeBackend, NullProgress, ProgressDisplay,
     ProgressSink, StreamBackend, UnsafeArchiveError, __version__,
     _ARCHIVE_SUFFIXES, _C, _file_size, _init_color, _iter_items, _paint,
@@ -1304,13 +1304,17 @@ def _build_parser() -> argparse.ArgumentParser:
     i = sub.add_parser("info", help="show archive summary")
     i.add_argument("archive")
 
+    t = sub.add_parser("test", help="verify archive payload integrity", allow_abbrev=False)
+    t.add_argument("archive")
+    t.add_argument("-q", "--quiet", action="store_true")
+
     u = sub.add_parser("update", help="check for releases or update a managed installation")
     update_action = u.add_mutually_exclusive_group()
     update_action.add_argument("--check", action="store_true", help="check for a newer stable release")
     update_action.add_argument("--enable-checks", action="store_true", help="enable daily automatic checks")
     update_action.add_argument("--disable-checks", action="store_true", help="disable automatic checks")
 
-    for command in (c, x, l, i):
+    for command in (c, x, l, i, t):
         passwords = command.add_mutually_exclusive_group()
         passwords.add_argument("--password", action="store_true",
                                help="securely prompt for a password")
@@ -1369,6 +1373,12 @@ def _print_extract_summary(report: ExtractReport) -> None:
     print(f"  avg speed  : {human_bytes(report.avg_speed)}/s")
     if report.skipped:
         print(f"  skipped    : {len(report.skipped)} item(s)")
+
+
+def _print_test_summary(report: TestReport) -> None:
+    print(f"Tested {_safe(report.archive)}  [{report.format.value}]")
+    print(f"  {report.entries} entries, {report.files} files, {human_bytes(report.bytes_read)} decoded")
+    print("Archive is OK.")
 
 
 def _entry_kind(entry: ArchiveEntry) -> str:
@@ -1454,6 +1464,13 @@ def _cmd_list(args, engine: ArchiveEngine) -> None:
             print(_safe(entry.name))
 
 
+def _cmd_test(args, engine: ArchiveEngine) -> None:
+    report = engine.test(args.archive, password=_read_password(args),
+                         progress=ProgressDisplay("test", quiet=args.quiet))
+    if not args.quiet:
+        _print_test_summary(report)
+
+
 def _cmd_info(args, engine: ArchiveEngine) -> None:
     data = engine.info(args.archive, password=_read_password(args))
     width = max(len(k) for k in data)
@@ -1532,6 +1549,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "extract": _cmd_extract,
         "list": _cmd_list,
         "info": _cmd_info,
+        "test": _cmd_test,
     }
 
     try:
