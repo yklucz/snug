@@ -4,6 +4,8 @@
 
 The table describes implemented capabilities with the appropriate dependencies installed. It does not guarantee every codec, encrypted variant, or multi-volume form of a format. See [Installation](installation.md) for backend setup and [Usage](usage.md) for commands.
 
+Run `snug formats` (or `snug formats --json`) for this installation's read/write capabilities. The report derives rows from backend declarations, optional-component availability, and successful native reader/filter/writer registrations; it does not test every codec or encrypted variant. `snug doctor` reports component versions and managed-runtime health without repair or network access.
+
 | Format | Extract | Create | Backend |
 |---|:---:|:---:|---|
 | ZIP | ✅ | ✅ | Python standard library; libarchive fallback for reading |
@@ -22,7 +24,13 @@ The table describes implemented capabilities with the appropriate dependencies i
 
 TAR creation supports `tar`, `tar.gz`, `tar.bz2`, and `tar.xz` (including suffix aliases `.tgz`, `.tbz`, `.tbz2`, and `.txz`). There is no `tar.lzma` creation format. Standalone LZMA uses the LZMA-alone container.
 
-CPIO creation uses `cpio_newc`; AR creation uses `ar_bsd`. Their availability depends on the native library advertising those writers. Use `snug info archive` to see the selected backend and whether its detected format can be created with the installed backends. Listing or inspecting an archive is not a full integrity test of every payload.
+CPIO creation uses `cpio_newc`; AR creation uses `ar_bsd`. Their availability depends on the installed native library. Use `snug info archive` to see the selected backend and whether its detected format can be created with the installed backends. Listing or inspecting an archive is not a full integrity test of every payload; use `snug test archive` for payload consumption and decoder-supported checks.
+
+## Integrity and extraction guarantees
+
+`test` reads ZIP regular-file and symlink payloads for CRC verification, consumes TAR regular files and compressed trailers, fully decodes standalone streams, supplies py7zr with counting null-sink writers, and consumes libarchive regular-file blocks. It writes no extracted files and does not retain whole regular payloads in memory. Codecs have their own memory requirements. Checksums are format-dependent: plain TAR and other formats without payload checksums cannot detect every arbitrary content change. Archives stored inside members require a separate test.
+
+All extraction backends use shared temporary sibling files for regular outputs, with publication only after decoding/closure succeeds. Atomicity is per file, subject to filesystem support; see [Security](security.md#temporary-files-and-backend-authority). [Explicit limits](usage.md#extraction-limits) check declared and actual decoded bytes. Compression ratios are checked only when reliable per-member compressed sizes exist; solid 7z members and many libarchive formats do not provide them.
 
 ## ZIP and ZIPX
 
@@ -42,7 +50,7 @@ Windows symlink creation may require Developer Mode or an elevated process, depe
 
 ## RAR and multi-volume archives
 
-RAR and RAR5 extraction use libarchive. Snug cannot create RAR. Encrypted RAR extraction is explicitly rejected when detected or reported by the backend; supplying a password does not add support.
+RAR and RAR5 extraction use libarchive. Snug cannot create RAR. Encrypted RAR extraction/testing is explicitly rejected when detected or reported by the backend; supplying a password does not add support. RAR5 capability requires its own successful native reader registration and is not inferred from RAR support.
 
 There is no CLI for splitting archives or assembling multi-volume sets. Snug opens a single archive path and does not orchestrate adjacent RAR, 7z, or ZIP volumes. Multi-volume archives are not a supported workflow, even though `multivolumefile` is a py7zr dependency.
 
@@ -56,7 +64,7 @@ There is no CLI for splitting archives or assembling multi-volume sets. Snug ope
 
 `.gz`, `.bz2`, `.xz`, and `.lzma` expose exactly one regular-file output in Snug. Creation accepts exactly one regular-file source; directories, multiple sources, and stored symlinks are rejected. A symlink to a regular file can be read with `--symlinks follow`. Use a TAR variant for a directory or multiple files.
 
-The extracted name comes from the input basename with the compression suffix removed, or gains `.out` when no known suffix exists. Snug ignores the GZIP header filename. These streams do not support passwords or archive-level file metadata. `list` and `info` decompress the stream to calculate its uncompressed size.
+The extracted name comes from the input basename with the compression suffix removed, or gains `.out` when no known suffix exists. Snug ignores the GZIP header filename. These streams do not support passwords or archive-level file metadata. `list` and `info` decompress the stream to calculate its uncompressed size. `extract` and `test` begin with an unknown decoded size and stream the payload once; extraction still checks actual bytes against explicit limits.
 
 ## Other boundaries and evidence
 

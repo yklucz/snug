@@ -19,11 +19,16 @@ snug create backup.7z folder/
 snug extract archive.rar -C output/
 snug list backup.7z
 snug info backup.7z
+snug test backup.7z
+snug doctor
+snug formats
 snug update --check
 snug update
 ```
 
 Run `snug` to open the terminal menu and file picker. Archive commands require their full names; paths are never interpreted as implicit commands.
+
+Regular-file extraction stages each payload before atomic publication where supported. Optional [extraction limits](docs/usage.md#extraction-limits) bound selected entry counts and decoded sizes. Use `test` to verify payloads and `doctor` for offline installation diagnostics.
 
 ## Supported formats
 
