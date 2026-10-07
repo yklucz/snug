@@ -120,6 +120,13 @@ repair() (
 )
 
 find_brew
+# Offline diagnostics must work with an existing Python even when the optional
+# libraries or runtime state are broken. Resolve paths without probing/repair.
+if [[ "$MODE" == --run && ( "${1:-}" == doctor || "${1:-}" == formats ) ]]; then
+  resolve_runtime || true
+  [[ -n "$SNUG_PYTHON" && -x "$SNUG_PYTHON" ]] || die 'An existing managed Python is required to run diagnostics.'
+  exec "$SNUG_PYTHON" -B "$APP_DIR/snug_runtime.py" --run "$@"
+fi
 # Update checks need only the existing Python, even if an optional backend needs repair.
 if [[ "$MODE" == --run && "${1:-}" == update ]] && resolve_runtime; then
   exec "$SNUG_PYTHON" -B "$APP_DIR/snug.py" "$@"

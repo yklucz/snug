@@ -2,7 +2,7 @@
 """Snug — a lightweight Python CLI archive manager with live speed and ETA.
 
 Run without arguments for the existing interactive terminal interface, or use
-create, extract, list, info, test and update. Archive I/O and safety live in snug_core;
+create, extract, list, info, test, doctor, formats and update. Archive I/O and safety live in snug_core;
 optional broad-format and 7z implementations live in snug_ext.
 """
 from __future__ import annotations
@@ -1308,6 +1308,11 @@ def _build_parser() -> argparse.ArgumentParser:
     t.add_argument("archive")
     t.add_argument("-q", "--quiet", action="store_true")
 
+    d = sub.add_parser("doctor", help="report offline installation health", allow_abbrev=False)
+    d.add_argument("--json", action="store_true", help="print a stable JSON report")
+    f = sub.add_parser("formats", help="show installed archive capabilities", allow_abbrev=False)
+    f.add_argument("--json", action="store_true", help="print a stable JSON report")
+
     u = sub.add_parser("update", help="check for releases or update a managed installation")
     update_action = u.add_mutually_exclusive_group()
     update_action.add_argument("--check", action="store_true", help="check for a newer stable release")
@@ -1482,6 +1487,294 @@ def _cmd_info(args, engine: ArchiveEngine) -> None:
         print(f"{key:<{width}} : {_safe(value)}")
 
 
+# Diagnostics deliberately do not call runtime activation, repair, or updater APIs.
+def _diagnostic_json(path: Path) -> dict:
+    import json
+    try:
+        with path.open("rb") as source:
+            raw = source.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            return {"status": "corrupt", "message": "JSON file exceeds diagnostic size limit"}
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return {"status": "corrupt", "message": "expected a JSON object"}
+        return {"status": "ok", "data": data}
+    except FileNotFoundError:
+        return {"status": "missing"}
+    except (OSError, ValueError, RecursionError) as exc:
+        return {"status": "corrupt", "message": _safe(exc)}
+
+
+def _diagnostic_inventory(directory: Path, *, hashes: bool) -> dict:
+    import hashlib
+    import re
+    from pathlib import PurePosixPath
+    if not directory.exists():
+        return {"status": "missing", "verification": "sha256" if hashes else "presence"}
+    record = _diagnostic_json(directory / ".snug-files.json")
+    result = {"status": record["status"], "verification": "sha256" if hashes else "presence"}
+    if record["status"] != "ok":
+        return result
+    files = record["data"]
+    if not files:
+        return {**result, "status": "corrupt", "message": "empty file inventory"}
+    try:
+        root = directory.resolve()
+        if not (directory / ".snug-files.json").resolve().is_relative_to(root):
+            return {**result, "status": "corrupt", "message": "inventory escapes its directory"}
+        for name, expected in files.items():
+            if (not isinstance(name, str) or not name or "\\" in name or "\x00" in name
+                    or name.startswith("/") or any(part in ("", ".", "..") or ":" in part
+                                                  for part in name.split("/"))
+                    or not isinstance(expected, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected)):
+                return {**result, "status": "corrupt", "message": "invalid inventory member"}
+            candidate = directory.joinpath(*PurePosixPath(name).parts)
+            if not candidate.resolve().is_relative_to(root):
+                return {**result, "status": "corrupt", "message": "inventory member escapes its directory"}
+            if not candidate.is_file():
+                return {**result, "status": "broken", "message": "recorded file is missing"}
+            if hashes:
+                checksum = hashlib.sha256()
+                with candidate.open("rb") as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        checksum.update(chunk)
+                if checksum.hexdigest() != expected.lower():
+                    return {**result, "status": "broken", "message": "recorded file checksum mismatch"}
+    except (OSError, ValueError) as exc:
+        return {**result, "status": "broken", "message": _safe(exc)}
+    return {**result, "files": len(files)}
+
+
+def _diagnostic_rar5_reader(ffi) -> bool:
+    """Old binding allowlists omit RAR5; require a successful native probe."""
+    handle = None
+    try:
+        probe = ffi.ffi("read_support_format_rar5", [ffi.c_archive_p], ffi.c_int)
+        handle = ffi.read_new()
+        return bool(handle) and probe(handle) == 0
+    except Exception:
+        return False
+    finally:
+        if handle:
+            ffi.read_free(handle)
+
+
+def _diagnostic_backends(backends=None) -> list[dict]:
+    import importlib
+    import importlib.metadata
+    import re
+    from snug_core import _backends
+    result = []
+    library_override = os.environ.get("LIBARCHIVE")
+    try:
+        for backend in list(backends) if backends is not None else _backends():
+            component = {"name": str(backend.name), "status": "ok", "available": False,
+                         "read_formats": sorted(fmt.value for fmt in backend.read_formats),
+                         "write_formats": sorted(fmt.value for fmt in backend.write_formats)}
+            try:
+                if not backend.available():
+                    component.update(status="unavailable", message=f"{backend.name} unavailable")
+                elif backend.name == "py7zr":
+                    library = getattr(backend, "_library")()
+                    version = str(getattr(library, "__version__", "unknown"))
+                    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:$|[.a-zA-Z+-])", version)
+                    supported = bool(match and (1, 1, 3) <= tuple(map(int, match.groups())) < (2,))
+                    api = callable(getattr(library, "SevenZipFile", None)) and callable(getattr(library, "is_7zfile", None))
+                    writer = hasattr(importlib.import_module("py7zr.io"), "WriterFactory")
+                    aes = False
+                    try:
+                        importlib.import_module("Cryptodome.Cipher.AES").new(bytes(32), 1)
+                        aes = True
+                    except Exception:
+                        pass
+                    component.update(version=version, compatible=supported,
+                                     required_api=api and writer, aes=aes,
+                                     available=supported and api and writer and aes)
+                    if not component["available"]:
+                        component.update(status="broken", message="py7zr version, streaming API, or AES support is unusable")
+                elif backend.name == "libarchive":
+                    library = getattr(backend, "_library")()
+                    ffi = library.ffi
+                    native = int(ffi.version_number())
+                    readers = sorted(str(value) for value in ffi.READ_FORMATS)
+                    if "rar5" not in readers and _diagnostic_rar5_reader(ffi):
+                        readers = sorted([*readers, "rar5"])
+                    writers = sorted(str(value) for value in ffi.WRITE_FORMATS)
+                    filters = sorted(str(value) for value in getattr(ffi, "READ_FILTERS", ()))
+                    api = callable(getattr(library, "file_reader", None)) and callable(getattr(library, "file_writer", None))
+                    try:
+                        binding = importlib.metadata.version("libarchive-c")
+                    except importlib.metadata.PackageNotFoundError:
+                        binding = str(getattr(library, "__version__", "unknown"))
+                    required_readers = {"7zip", "ar", "cab", "cpio", "iso9660", "lha", "rar", "xar", "warc", "zip"}
+                    managed = native >= 3008000 and required_readers <= set(readers) and {"ar_bsd", "cpio_newc"} <= set(writers)
+                    component.update(binding_version=binding, native_version=native,
+                                     native_version_string=f"{native // 1000000}.{native // 1000 % 1000}.{native % 1000}",
+                                     required_api=api, managed_compatible=managed,
+                                     native_readers=readers, native_writers=writers,
+                                     native_filters=filters, available=api)
+                    if not api:
+                        component.update(status="broken", message="libarchive streaming API is unusable")
+                else:
+                    component["available"] = True
+                if component["available"]:
+                    component["write_formats"] = sorted(fmt.value for fmt in backend.write_formats if backend.can_write(fmt))
+            except Exception as exc:
+                component.update(status="broken", available=False, message=_safe(exc))
+            result.append(component)
+    finally:
+        if library_override is None:
+            os.environ.pop("LIBARCHIVE", None)
+        else:
+            os.environ["LIBARCHIVE"] = library_override
+    return result
+
+
+def _formats_report(backends=None) -> dict:
+    components = _diagnostic_backends(backends)
+    rows = []
+    # These are reader-name aliases, not a separate archive capability matrix.
+    aliases = {"7z": "7zip", "iso": "iso9660", "zipx": "zip", "lzh": "lha", "deb": "ar", "rpm": "cpio"}
+    for fmt in ArchiveFormat:
+        readers, writers, unavailable = [], [], []
+        for component in components:
+            declares_read = fmt.value in component["read_formats"]
+            declares_write = fmt.value in component["write_formats"]
+            if not (declares_read or declares_write):
+                continue
+            if not component["available"]:
+                unavailable.append(f"{component['name']} {component['status']}")
+                continue
+            readable = declares_read
+            if component["name"] == "libarchive":
+                name = aliases.get(fmt.value, fmt.value)
+                readable = readable and name in component["native_readers"]
+                if fmt.value == "rpm":
+                    readable = readable and "rpm" in component["native_filters"]
+            if readable:
+                readers.append(component["name"])
+            elif declares_read:
+                unavailable.append(f"{component['name']} reader unavailable")
+            if declares_write:
+                writers.append(component["name"])
+        status = "read/write" if readers and writers else "read only" if readers else "write only" if writers else "unavailable"
+        if fmt.value == "zipx" and "native" in readers:
+            unavailable.append("native ZIPX reading supports only this Python's ZIP codecs; other methods require libarchive")
+        rows.append({"format": fmt.value, "read": bool(readers), "write": bool(writers),
+                     "read_backends": readers, "write_backends": writers, "status": status,
+                     "details": unavailable})
+    return {"schema_version": 1, "formats": rows,
+            "note": "Capabilities describe installed backends and registered readers; individual codecs, encryption, and archive variants can still be unsupported."}
+
+
+def _doctor_report(root: Path | None = None, backends=None) -> dict:
+    import platform
+    import re
+    root = Path(__file__).resolve().parent if root is None else Path(root).resolve()
+    state = _diagnostic_json(root / "runtime.json")
+    lock = _diagnostic_json(root / "runtime-lock.json")
+    marker = _diagnostic_json(root / ".snug-install.json")
+    if lock["status"] == "ok":
+        binding = lock["data"].get("binding", {})
+        if (type(lock["data"].get("schema")) is not int or lock["data"].get("schema") != 1
+                or not isinstance(binding, dict) or not isinstance(binding.get("filename"), str)
+                or not binding.get("filename") or not isinstance(binding.get("url"), str)
+                or not binding.get("url", "").startswith("https://")
+                or not isinstance(binding.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-fA-F]{64}", binding.get("sha256", ""))):
+            lock = {"status": "corrupt", "message": "invalid runtime lock schema"}
+    marker_data = marker.get("data", {})
+    state_data = state.get("data", {})
+    if state["status"] == "ok" and state_data.get("kind") not in ("homebrew", "windows"):
+        state = {"status": "corrupt", "message": "invalid runtime state kind"}
+    source = any((parent / ".git").exists() for parent in (root, *root.parents))
+    pip = bool(list(root.glob("*.dist-info")) or list(root.glob("*.egg-info")))
+    configured = os.environ.get("SNUG_MANAGED_ROOT")
+    try:
+        identified = bool(configured and Path(configured).resolve() == root)
+    except (OSError, ValueError):
+        identified = False
+    homebrew = (type(marker_data.get("schema")) is int and marker_data.get("schema") == 1
+                and marker_data.get("kind") == "homebrew" and marker_data.get("branch") == "main"
+                and not (root / ".snug-install.json").is_symlink())
+    windows = ((state["status"] == "ok" and state_data.get("kind") == "windows")
+               or ((root / "runtime.ps1").is_file() and (root / "runtime.json").exists())
+               or (identified and sys.platform == "win32"))
+    managed = not (source or pip) and (identified or windows)
+    kind = "source" if source else "pip" if pip else "windows" if windows else "homebrew" if homebrew else "external"
+    updater_owned = managed and homebrew and sys.platform != "win32"
+    integrity = {name: _diagnostic_inventory(root / name, hashes=name == "vendor")
+                 for name in ("vendor", "packages", "native")}
+    components = _diagnostic_backends(backends)
+    healthy = sys.version_info >= (3, 10)
+    for component in components:
+        required = managed or component["name"] in ("native", "native-stream")
+        component["required"] = required
+        if required and (not component["available"] or (component["name"] == "libarchive" and not component.get("managed_compatible", True))):
+            healthy = False
+    if managed:
+        if lock["status"] != "ok" or integrity["vendor"]["status"] != "ok":
+            healthy = False
+        if windows and (state["status"] != "ok" or state_data.get("kind") != "windows"):
+            healthy = False
+        for name in ("packages", "native"):
+            if (root / name).exists() and integrity[name]["status"] != "ok":
+                healthy = False
+    for description in (state, lock, marker):
+        description.pop("data", None)
+    return {"schema_version": 1, "ok": healthy, "snug_version": __version__,
+            "python": {"version": platform.python_version(), "executable": sys.executable, "supported": sys.version_info >= (3, 10)},
+            "platform": {"system": platform.system(), "architecture": platform.machine()},
+            "backends": components,
+            "runtime": {"managed": managed, "kind": kind, "state": state, "lock": lock, "integrity": integrity},
+            "updater": {"ownership": "managed" if updater_owned else "external", "marker": marker,
+                        "reason": "installer-owned main Homebrew installation" if updater_owned else "update using the original installation method"}}
+
+
+def _cmd_doctor(args) -> int:
+    import json
+    report = _doctor_report()
+    if args.json:
+        print(json.dumps(report, sort_keys=True, ensure_ascii=True))
+    else:
+        print(f"Snug {report['snug_version']}  Python {report['python']['version']}")
+        print(f"Platform: {_safe(report['platform']['system'])} {_safe(report['platform']['architecture'])}")
+        for component in report["backends"]:
+            requirement = "required" if component["required"] else "optional"
+            detail = component.get("message", component.get("version", component.get("native_version_string", "")))
+            print(f"{_safe(component['name'])}: {component['status']} ({requirement}) {_safe(detail)}".rstrip())
+            if component["name"] == "py7zr" and "required_api" in component:
+                print(f"  required API: {component['required_api']}; AES: {component['aes']}")
+            if component["name"] == "libarchive" and "native_readers" in component:
+                print(f"  binding: {_safe(component['binding_version'])}; managed-compatible: {component['managed_compatible']}")
+                print(f"  readers: {_safe(', '.join(component['native_readers']))}")
+                print(f"  writers: {_safe(', '.join(component['native_writers']))}")
+        runtime = report["runtime"]
+        print(f"Runtime: {runtime['kind']}; state: {runtime['state']['status']}; lock: {runtime['lock']['status']}")
+        for name, inventory in runtime["integrity"].items():
+            print(f"  {name}: {inventory['status']} ({inventory['verification']})")
+        print(f"Updater installation: {report['updater']['ownership']}")
+        print("Required components are healthy." if report["ok"] else "Required components need attention.")
+    return 0 if report["ok"] else 2
+
+
+def _cmd_formats(args) -> int:
+    import json
+    report = _formats_report()
+    if args.json:
+        print(json.dumps(report, sort_keys=True, ensure_ascii=True))
+    else:
+        print(f"{'Format':<9} {'Read':<5} {'Write':<5} Backend / status")
+        for row in report["formats"]:
+            names = list(dict.fromkeys([*row["read_backends"], *row["write_backends"]]))
+            status = ", ".join(names) if names else "; ".join(row["details"]) or "unavailable"
+            if names and row["details"]:
+                status += "; " + "; ".join(row["details"])
+            print(f"{row['format']:<9} {'yes' if row['read'] else 'no':<5} {'yes' if row['write'] else 'no':<5} {_safe(status)}")
+        print(report["note"])
+    return 0
+
+
 def _cmd_update(args) -> int:
     from snug_update import UpdateError, check_update, perform_update, set_checks
     try:
@@ -1540,6 +1833,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "update":
         return _cmd_update(args)
+    if args.command in {"doctor", "formats"}:
+        try:
+            return _cmd_doctor(args) if args.command == "doctor" else _cmd_formats(args)
+        except (ArchiveError, OSError, ValueError) as exc:
+            print(f"error: {_safe(exc)}", file=sys.stderr)
+            return 2
+        except KeyboardInterrupt:
+            print("\ninterrupted", file=sys.stderr)
+            return 130
 
     handle = _start_update_check()
     engine = ArchiveEngine()
