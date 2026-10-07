@@ -57,6 +57,65 @@ def assert_no_temporary_files(root):
     assert leftovers == []
 
 
+@pytest.mark.parametrize("failure", [core.ArchiveError("payload CRC failure"), KeyboardInterrupt()])
+def test_cleanup_failure_attempts_all_outputs_and_preserves_primary(
+    engine, tmp_path, monkeypatch, failure,
+):
+    archive = tmp_path / "multiple.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr("first.txt", b"first complete member")
+        handle.writestr("second.txt", b"second complete member")
+    backend = core.NativeBackend()
+    extraction = backend.extract
+    abort = core.SafeOutputFile.abort
+    attempted = []
+    failed_cleanup = []
+
+    def fail_after_staging(path, ctx, password=None):
+        extraction(path, ctx, password=password)
+        raise failure
+
+    def abort_with_failure(output):
+        attempted.append(output.entry.name)
+        abort(output)
+        if not failed_cleanup:
+            failed_cleanup.append(True)
+            raise OSError("injected close failure after its unlink")
+
+    monkeypatch.setattr(backend, "extract", fail_after_staging)
+    monkeypatch.setattr(core.SafeOutputFile, "abort", abort_with_failure)
+    engine = core.ArchiveEngine([backend])
+    with pytest.raises(type(failure)) as caught:
+        engine.extract(archive, tmp_path / "output")
+    assert caught.value is failure
+    assert attempted == ["first.txt", "second.txt"]
+    assert not list((tmp_path / "output").iterdir())
+
+
+def test_cleanup_only_failure_is_reported_after_all_attempts(engine, tmp_path, monkeypatch):
+    archive = tmp_path / "multiple.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr("first.txt", b"first complete member")
+        handle.writestr("second.txt", b"second complete member")
+    abort = core.SafeOutputFile.abort
+    attempted = []
+
+    def abort_with_failure(output):
+        attempted.append(output.entry.name)
+        abort(output)
+        if len(attempted) == 1:
+            raise OSError("injected staging cleanup failure")
+
+    monkeypatch.setattr(core.SafeOutputFile, "abort", abort_with_failure)
+    with pytest.raises(core.ArchiveError, match="cannot clean extraction staging for 'first.txt'") as caught:
+        engine.extract(archive, tmp_path / "output")
+    assert isinstance(caught.value.__cause__, OSError)
+    assert attempted == ["first.txt", "second.txt"]
+    assert (tmp_path / "output/first.txt").read_bytes() == b"first complete member"
+    assert (tmp_path / "output/second.txt").read_bytes() == b"second complete member"
+    assert_no_temporary_files(tmp_path / "output")
+
+
 @pytest.mark.parametrize("suffix", FORMATS)
 @pytest.mark.parametrize("content", [b"", PAYLOAD], ids=["empty", "streamed"])
 def test_completed_regular_file_replaces_old_content(engine, tmp_path, suffix, content):

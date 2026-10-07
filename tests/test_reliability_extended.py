@@ -35,6 +35,39 @@ def assert_clean(dest, target, existing):
         assert not target.exists()
 
 
+def test_sevenzip_failed_cleanup_preserves_decoder_error_and_attempts_all_staging(
+    tmp_path, py7zr_backend, monkeypatch,
+):
+    archive = tmp_path / "multiple.7z"
+    with py7zr_backend.SevenZipFile(archive, "w", filters=[{"id": py7zr_backend.FILTER_COPY}]) as handle:
+        handle.writestr(b"first complete", "first.txt")
+        handle.writestr(b"second complete", "second.txt")
+    decoder = py7zr_backend.SevenZipFile.extract
+    abort = core.SafeOutputFile.abort
+    primary = core.ArchiveError("injected late CRC failure")
+    attempted = []
+    failed_cleanup = []
+
+    def fail_decoder(self, *args, **kwargs):
+        decoder(self, *args, **kwargs)
+        raise primary
+
+    def fail_first_cleanup(output):
+        attempted.append(output.entry.name)
+        abort(output)
+        if not failed_cleanup:
+            failed_cleanup.append(True)
+            raise OSError("injected cleanup failure")
+
+    monkeypatch.setattr(py7zr_backend.SevenZipFile, "extract", fail_decoder)
+    monkeypatch.setattr(core.SafeOutputFile, "abort", fail_first_cleanup)
+    with pytest.raises(core.ArchiveError) as caught:
+        core.ArchiveEngine([SevenZipBackend()]).extract(archive, tmp_path / "output")
+    assert caught.value is primary
+    assert attempted[:2] == ["first.txt", "second.txt"]
+    assert not list((tmp_path / "output").iterdir())
+
+
 def seven_archive(py7zr_backend, tmp_path, password=None):
     archive = tmp_path / "sample.7z"
     filters = [{"id": py7zr_backend.FILTER_COPY}]
