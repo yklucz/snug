@@ -45,7 +45,7 @@ The [CI workflow](../.github/workflows/tests.yml) runs core tests on Linux with 
 | `tests/` | Test suite and vendored archive fixtures |
 | `docs/` | User and developer documentation |
 
-This checkout declares version `1.8.0` in both package metadata and `snug_core.__version__`. Keep those values aligned with the CLI version and tests when preparing a release.
+This checkout declares version `1.9.0` in both package metadata and `snug_core.__version__`. Keep those values aligned with the CLI version and tests when preparing a release.
 
 The flat module layout remains intentional for the current release: installers fetch those module filenames directly, and existing imports and the `snug = snug:main` entry point depend on them. `install.sh` and `runtime.sh` remain public at the root. Windows PowerShell scripts remain at the root of `windows`, with its raw installer URL pointing to that branch.
 
