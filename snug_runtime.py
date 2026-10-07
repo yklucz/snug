@@ -31,13 +31,13 @@ def load_lock(root: Path = APP) -> dict[str, Any]:
     return json.loads((root / "runtime-lock.json").read_text(encoding="utf-8"))
 
 
-def activate(root: Path = APP) -> None:
+def activate(root: Path = APP, *, read_state: bool = True) -> None:
     """Put app-owned bindings first without modifying a shared Python environment."""
     for path in (root, root / "vendor", Path(os.environ.get("SNUG_PACKAGES", root / "packages"))):
         sys.path.insert(0, str(path))
     library = os.environ.get("SNUG_LIBRARY")
     state = root / "runtime.json"
-    if not library and state.is_file():
+    if read_state and not library and state.is_file():
         try:
             library = json.loads(state.read_text(encoding="utf-8")).get("library")
         except (OSError, ValueError):
@@ -345,7 +345,10 @@ def main() -> int:
             activate()
             check_backend(args[0])
         elif command == "--run":
-            check()
+            if args and args[0] in ("doctor", "formats"):
+                activate(read_state=False)
+            else:
+                check()
             from snug import main as snug_main
             return snug_main(args)
         else:
