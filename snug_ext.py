@@ -251,7 +251,8 @@ class LibarchiveBackend:
                     elif raw.islnk:
                         _extract_entry(ctx, entry, hardlink=entry.link_target)
                     elif raw.isreg:
-                        _extract_entry(ctx, entry, chunks=self._entry_chunks(raw, raw.size))
+                        _extract_entry(ctx, entry, chunks=self._entry_chunks(
+                            raw, raw.size, trim_padding=metadata.get("format") == "warc"))
                     else:
                         ctx.report.skipped.append(entry.name)
         except ArchiveError:
@@ -260,9 +261,13 @@ class LibarchiveBackend:
             self._raise_read_error(path, exc, password)
 
     @staticmethod
-    def _entry_chunks(raw, size: int | None) -> Iterable[bytes]:
+    def _entry_chunks(raw, size: int | None, *, trim_padding: bool = False) -> Iterable[bytes]:
         # WARC records include alignment padding in libarchive's data stream;
         # only the declared member size belongs in the extracted file.
+        # Every other format exposes every decoded byte to the shared budget.
+        if not trim_padding:
+            yield from raw.get_blocks(CHUNK_SIZE)
+            return
         remaining = size
         for block in raw.get_blocks(CHUNK_SIZE):
             if remaining is None:
@@ -352,7 +357,7 @@ class _DiskWriter:
     def __init__(self, output: SafeOutputFile, entry: ArchiveEntry):
         self.output, self.entry = output, entry
         self.handle = output.handle
-        if entry.size == 0:
+        if entry.size_known and entry.size == 0:
             self.output.seal()
 
     @property
@@ -360,10 +365,10 @@ class _DiskWriter:
         return self.output.length
 
     def write(self, data: bytes | bytearray) -> int:
-        if self.length + len(data) > self.entry.size:
-            raise ArchiveError(f"7z member exceeds its declared size: {self.entry.name!r}")
         count = self.output.write(data)
-        if self.length == self.entry.size:
+        if self.entry.size_known and self.length > self.entry.size:
+            raise ArchiveError(f"7z member exceeds its declared size: {self.entry.name!r}")
+        if self.entry.size_known and self.length == self.entry.size:
             # Release descriptors without publishing before py7zr's CRC gate.
             self.output.seal()
         return count
@@ -399,13 +404,18 @@ class _LinkWriter:
 
     limit = 65536
 
-    def __init__(self):
+    def __init__(self, entry: ArchiveEntry, ctx: _ExtractContext):
+        self.entry, self.ctx = entry, ctx
+        self.length = 0
         self.buffer = io.BytesIO()
 
     def write(self, data: bytes | bytearray) -> int:
+        self.ctx.budget.consume(self.entry, self.length, len(data))
         if self.buffer.tell() + len(data) > self.limit:
             raise ArchiveError("7z symbolic-link target exceeds the safe 64 KiB limit")
-        return self.buffer.write(data)
+        count = self.buffer.write(data)
+        self.length += count
+        return count
 
     def read(self, size: int | None = None) -> bytes:
         return self.buffer.read(-1 if size is None else size)
@@ -459,7 +469,7 @@ class _SevenZipWriters:
         if not self.ctx.overwrite and exists:
             return self._skip(entry)
         if entry.is_symlink:
-            return _LinkWriter()
+            return _LinkWriter(entry, self.ctx)
         output = SafeOutputFile(self.ctx, entry, target)
         if output.skipped:
             return self.library.io.NullIO()
@@ -485,7 +495,7 @@ class _SevenZipWriters:
                 _extract_entry(self.ctx, linked_entry)
 
     def _finish_file(self, entry: ArchiveEntry, target: Path, product: _DiskWriter) -> None:
-        if product.length != entry.size:
+        if entry.size_known and product.length != entry.size:
             raise ArchiveError(f"truncated 7z member: {entry.name!r}")
         product.close()
 
@@ -546,7 +556,10 @@ class SevenZipBackend:
             mtime = timestamp.totimestamp() if timestamp is not None else None
             result.append(ArchiveEntry(
                 name=raw.filename, size=max(0, raw.uncompressed or 0),
-                compressed_size=raw.compressed, is_dir=raw.is_directory,
+                # In a solid folder the first entry carries the whole folder's
+                # packed size, not a measured compressed size for that file.
+                compressed_size=None if getattr(getattr(raw, "folder", None), "solid", False)
+                else raw.compressed, is_dir=raw.is_directory,
                 is_symlink=raw.is_symlink, mode=properties.get("posix_mode"), mtime=mtime,
             ))
         return result

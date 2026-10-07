@@ -27,7 +27,8 @@ if TYPE_CHECKING:
 
 from snug_core import (
     ArchiveEngine, ArchiveEntry, ArchiveError, ArchiveFormat, CreateReport,
-    ExtractReport, FormatError, NativeBackend, NullProgress, ProgressDisplay,
+    ExtractReport, ExtractionLimits, ResourceLimitError, parse_size,
+    FormatError, NativeBackend, NullProgress, ProgressDisplay,
     ProgressSink, StreamBackend, UnsafeArchiveError, __version__,
     _ARCHIVE_SUFFIXES, _C, _file_size, _init_color, _iter_items, _paint,
     _safe, _truncate, _visible_len, detect_format, human_bytes, human_time,
@@ -1223,6 +1224,30 @@ def _launch_interactive() -> int:
 #  CLI
 # --------------------------------------------------------------------------- #
 
+def _parse_count(text: str) -> int:
+    if not text.isascii() or not text.isdigit():
+        raise argparse.ArgumentTypeError('count must be a nonnegative integer')
+    return int(text)
+
+
+def _parse_size_argument(text: str) -> int:
+    try:
+        return parse_size(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _parse_ratio(text: str) -> float:
+    import math
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('ratio must be a finite positive number') from exc
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError('ratio must be a finite positive number')
+    return value
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="snug",
@@ -1252,7 +1277,7 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument("-q", "--quiet", action="store_true",
                    help="suppress progress and summary output")
 
-    x = sub.add_parser("extract", help="extract an archive")
+    x = sub.add_parser("extract", help="extract an archive", allow_abbrev=False)
     x.add_argument("archive", help="archive to extract")
     x.add_argument("-C", "--directory", default=".", metavar="DIR",
                    help="destination directory (default: .)")
@@ -1266,6 +1291,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="do not restore permissions / timestamps")
     x.add_argument("--symlinks", choices=["store", "skip"], default="store")
     x.add_argument("-q", "--quiet", action="store_true")
+    x.add_argument('--max-files', type=_parse_count, default=None, metavar='N', help='maximum selected entry count')
+    x.add_argument('--max-size', type=_parse_size_argument, default=None, metavar='SIZE', help='maximum decoded bytes (K/KB decimal, KiB binary)')
+    x.add_argument('--max-file-size', type=_parse_size_argument, default=None, metavar='SIZE', help='maximum decoded bytes per member')
+    x.add_argument('--max-ratio', type=_parse_ratio, default=None, metavar='RATIO', help='maximum ratio when reliable member sizes exist')
 
     l = sub.add_parser("list", help="list archive contents")
     l.add_argument("archive")
@@ -1406,6 +1435,7 @@ def _cmd_extract(args, engine: ArchiveEngine) -> None:
         preserve_metadata=not args.no_metadata,
         symlinks=args.symlinks,
         strip_components=args.strip_components,
+        limits=ExtractionLimits(args.max_files, args.max_size, args.max_file_size, args.max_ratio),
         progress=display,
         password=_read_password(args),
     )
@@ -1506,6 +1536,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         dispatch[args.command](args, engine)
+    except ResourceLimitError as exc:
+        print(f"error: {_safe(exc)}", file=sys.stderr)
+        return 4
     except UnsafeArchiveError as exc:
         print(f"error: unsafe archive: {_safe(exc)}", file=sys.stderr)
         return 3
