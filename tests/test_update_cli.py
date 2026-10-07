@@ -49,6 +49,7 @@ def test_update_preferences_do_not_contact_network(isolated_updates, monkeypatch
 
 def test_manual_update_dispatch(isolated_updates, monkeypatch, capsys):
     calls = []
+    monkeypatch.setattr(snug, "ArchiveEngine", lambda: pytest.fail("update must not open an archive engine"))
     monkeypatch.setattr(update, "perform_update", lambda version: calls.append(version) or "Updated Snug.")
     assert snug.main(["update"]) == 0
     assert calls == [snug.__version__]

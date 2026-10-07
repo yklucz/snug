@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from dataclasses import replace
 import os
+from pathlib import Path
 import stat
 
 import pytest
@@ -321,3 +322,213 @@ def test_libarchive_inspection_marks_special_entries_without_extracting_them(eng
     report = engine.extract(archive, output)
     assert report.files == 0 and report.skipped == ["pipe"]
     assert not (output / "pipe").exists()
+
+
+class IntegrityProgress:
+    def __init__(self):
+        self.starts = []
+        self.items = []
+        self.bytes = 0
+        self.completed = False
+
+    def start(self, total_bytes, total_items):
+        self.starts.append((total_bytes, total_items))
+
+    def item(self, name):
+        self.items.append(name)
+
+    def chunk(self, size):
+        self.bytes += size
+
+    def done(self):
+        self.completed = True
+
+
+def forbid_extraction_writes(monkeypatch):
+    open_path = Path.open
+
+    def read_only(self, mode="r", *args, **kwargs):
+        assert not any(flag in mode for flag in ("w", "a", "x", "+")), f"integrity test attempted to write {self}"
+        return open_path(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", read_only)
+    monkeypatch.setattr(core, "SafeOutputFile", lambda *args: pytest.fail("integrity tests must not stage disk outputs"))
+
+
+@pytest.mark.parametrize("encrypted", [False, True])
+def test_sevenzip_integrity_consumes_payload_without_writing(engine, tmp_path, py7zr_backend, monkeypatch, encrypted):
+    password = "correct password" if encrypted else None
+    archive = seven_archive(py7zr_backend, tmp_path, password)
+    before = sorted(str(path) for path in tmp_path.rglob("*"))
+    progress = IntegrityProgress()
+    forbid_extraction_writes(monkeypatch)
+    report = engine.test(archive, password=password, progress=progress)
+    assert report.entries == 1 and report.files == 1 and report.bytes_read == len(PAYLOAD)
+    assert progress.starts == [(len(PAYLOAD), 1)] and progress.bytes == len(PAYLOAD)
+    assert progress.items == ["payload.txt"] and progress.completed
+    assert sorted(str(path) for path in tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("fixture", [
+    "test_read_format_rar.rar", "test_read_format_rar5_compressed.rar", "test_read_format_cab_1.cab",
+    "test_read_format_iso_2.iso", "test_read_format_zip_ppmd8.zipx", "test_read_format_lha_header0.lzh",
+    "test_read_format_warc.warc", "test_read_format_cpio_svr4_gzip_rpm.rpm", "sample.xar",
+])
+def test_libarchive_fixture_integrity_reads_real_payload(engine, fixture_dir, libarchive_backend, monkeypatch, fixture):
+    archive = fixture_dir / fixture
+    inspection = LibarchiveBackend().inspect(archive)
+    expected = sum(entry.size for entry in inspection.entries
+                   if not (entry.is_dir or entry.is_symlink or entry.is_hardlink or entry.is_special))
+    progress = IntegrityProgress()
+    forbid_extraction_writes(monkeypatch)
+    report = engine.test(archive, progress=progress)
+    assert report.bytes_read == expected and progress.bytes == expected
+    assert report.files > 0 and progress.completed and len(progress.starts) == 1
+
+
+@pytest.mark.parametrize("failure", ["crc", "wrong-password", "close"])
+def test_sevenzip_integrity_failure_names_member_without_disk_changes(
+    engine, tmp_path, py7zr_backend, monkeypatch, failure,
+):
+    archive = seven_archive(py7zr_backend, tmp_path, "correct password" if failure == "wrong-password" else None)
+    if failure == "crc":
+        archive.write_bytes(archive.read_bytes().replace(PAYLOAD, b"X" + PAYLOAD[1:], 1))
+    before = {str(path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    progress = IntegrityProgress()
+    if failure == "close":
+        close = py7zr_backend.SevenZipFile.close
+
+        def failed_close(self):
+            close(self)
+            if self.mode == "r" and progress.bytes:
+                raise OSError("reader close validation failed")
+
+        monkeypatch.setattr(py7zr_backend.SevenZipFile, "close", failed_close)
+    forbid_extraction_writes(monkeypatch)
+    with pytest.raises(core.ArchiveError, match="payload.txt"):
+        engine.test(archive, password="wrong password" if failure == "wrong-password" else None, progress=progress)
+    assert not progress.completed
+    assert {str(path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+def test_sevenzip_truncated_integrity_returns_archive_error(engine, tmp_path, py7zr_backend, monkeypatch):
+    archive = seven_archive(py7zr_backend, tmp_path)
+    archive.write_bytes(archive.read_bytes()[:-12])
+    forbid_extraction_writes(monkeypatch)
+    with pytest.raises(core.ArchiveError):
+        engine.test(archive)
+    assert not list(tmp_path.rglob(".snug-part-*"))
+
+
+@pytest.mark.parametrize("failure", ["stream", "close"])
+def test_libarchive_integrity_failure_names_member(engine, tmp_path, libarchive_backend, monkeypatch, failure):
+    source = tmp_path / "payload.txt"
+    source.write_bytes(PAYLOAD)
+    archive = tmp_path / "payload.cpio"
+    engine.create(archive, [source])
+    progress = IntegrityProgress()
+    if failure == "stream":
+        chunks = LibarchiveBackend._entry_chunks
+
+        def failing_chunks(raw, size, **kwargs):
+            for chunk in chunks(raw, size, **kwargs):
+                yield chunk[:7]
+                raise OSError("decoder rejected corrupted content")
+
+        monkeypatch.setattr(LibarchiveBackend, "_entry_chunks", staticmethod(failing_chunks))
+    else:
+        reader = libarchive_backend.file_reader
+
+        @contextmanager
+        def failing_reader(*args, **kwargs):
+            with reader(*args, **kwargs) as stream:
+                yield stream
+            if progress.bytes:
+                raise OSError("reader close validation failed")
+
+        monkeypatch.setattr(libarchive_backend, "file_reader", failing_reader)
+    forbid_extraction_writes(monkeypatch)
+    with pytest.raises(core.ArchiveError, match="payload.txt"):
+        engine.test(archive, progress=progress)
+    assert not progress.completed
+
+
+@pytest.mark.parametrize("suffix,backend", [("7z", "py7zr_backend"), ("cpio", "libarchive_backend")])
+def test_optional_integrity_with_unknown_sizes_uses_entry_progress(
+    engine, tmp_path, request, monkeypatch, suffix, backend,
+):
+    request.getfixturevalue(backend)
+    source = tmp_path / "payload.txt"
+    source.write_bytes(PAYLOAD)
+    archive = tmp_path / f"payload.{suffix}"
+    engine.create(archive, [source])
+    if suffix == "cpio":
+        entry = LibarchiveBackend._entry
+        monkeypatch.setattr(LibarchiveBackend, "_entry", staticmethod(
+            lambda raw: replace(entry(raw), size=0, size_known=False)))
+    else:
+        entries = SevenZipBackend._entries
+        monkeypatch.setattr(SevenZipBackend, "_entries", staticmethod(
+            lambda archive: [replace(entry, size=0, size_known=False) for entry in entries(archive)]))
+    progress = IntegrityProgress()
+    report = engine.test(archive, progress=progress)
+    assert progress.starts == [(0, 1)] and progress.items == ["payload.txt"]
+    assert report.bytes_read == len(PAYLOAD) and progress.bytes == len(PAYLOAD)
+
+
+def test_sevenzip_integrity_rejects_duplicate_paths_before_library_renaming(engine, tmp_path, py7zr_backend, monkeypatch):
+    archive = tmp_path / "duplicate.7z"
+    with py7zr_backend.SevenZipFile(archive, "w") as handle:
+        handle._writestr(b"first", "same.txt")
+        handle._writestr(b"second", "same.txt")
+    monkeypatch.setattr(py7zr_backend.SevenZipFile, "extract", lambda *args, **kwargs: pytest.fail("duplicates must fail preflight"))
+    with pytest.raises(core.UnsafeArchiveError, match="duplicate"):
+        engine.test(archive)
+
+
+def test_sevenzip_integrity_rejects_decoded_escaping_symlink(engine, tmp_path, py7zr_backend, monkeypatch):
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"keep outside content")
+    source = tmp_path / "source/link"
+    source.parent.mkdir()
+    try:
+        source.symlink_to(Path("..") / outside.name)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"platform cannot create symlinks: {exc}")
+    archive = tmp_path / "escaping.7z"
+    with py7zr_backend.SevenZipFile(archive, "w") as handle:
+        handle.write(source, "link")
+    forbid_extraction_writes(monkeypatch)
+    with pytest.raises(core.UnsafeArchiveError, match="escaping"):
+        engine.test(archive)
+    assert outside.read_bytes() == b"keep outside content"
+
+
+@pytest.mark.parametrize("failure", ["unknown-writer", "missing-payload"])
+def test_sevenzip_integrity_cannot_succeed_from_listing_only(engine, tmp_path, py7zr_backend, monkeypatch, failure):
+    archive = seven_archive(py7zr_backend, tmp_path)
+
+    def no_decode(self, *, targets, recursive, factory):
+        if failure == "unknown-writer":
+            factory.create("not-in-the-archive.txt")
+
+    monkeypatch.setattr(py7zr_backend.SevenZipFile, "extract", no_decode)
+    with pytest.raises(core.ArchiveError, match="unexpected|not decoded"):
+        engine.test(archive)
+
+
+def test_optional_integrity_password_errors_are_redacted(engine, tmp_path, libarchive_backend, monkeypatch):
+    source = tmp_path / "payload.txt"
+    source.write_bytes(PAYLOAD)
+    archive = tmp_path / "payload.cpio"
+    engine.create(archive, [source])
+    password = "private password"
+
+    def fail(*args, **kwargs):
+        raise OSError(f"backend error involving {password}")
+        yield b""  # A lazy decoder error, rather than an inspection error.
+
+    monkeypatch.setattr(LibarchiveBackend, "_entry_chunks", staticmethod(fail))
+    with pytest.raises(core.ArchiveError) as caught:
+        engine.test(archive, password=password)
+    assert password not in str(caught.value) and "[redacted]" in str(caught.value)
