@@ -17,9 +17,9 @@ from typing import Any, Iterable, NoReturn, cast
 
 from snug_core import (
     ArchiveEntry, ArchiveError, ArchiveFormat, CHUNK_SIZE, CreateReport,
-    ProgressSink, UnsafeArchiveError, _ExtractContext, _apply_metadata,
-    _extract_entry, _prepare_file_target, _prepare_target, _resolve_member,
-    _selected, _detect_by_magic, _check_inside,
+    ProgressSink, SafeOutputFile, UnsafeArchiveError, _ExtractContext,
+    _extract_entry, _prepare_target, _resolve_member,
+    _selected, _detect_by_magic,
 )
 
 
@@ -171,7 +171,7 @@ class LibarchiveBackend:
             is_dir=bool(entry.isdir), is_symlink=bool(entry.issym),
             is_hardlink=bool(entry.islnk),
             link_target=_text(entry.linkpath) if entry.issym or entry.islnk else None,
-            mode=entry.mode, mtime=entry.mtime,
+            mode=entry.mode, mtime=entry.mtime, size_known=entry.size is not None,
         )
 
     @staticmethod
@@ -347,44 +347,48 @@ class LibarchiveBackend:
 
 
 class _DiskWriter:
-    """Py7zIO-compatible writer owning a safely opened output file."""
+    """Py7zIO adapter that seals a shared staged output, never publishes it."""
 
-    def __init__(self, handle, entry: ArchiveEntry, ctx: _ExtractContext, lock):
-        self.handle, self.entry, self.ctx, self.lock = handle, entry, ctx, lock
-        self.length = 0
+    def __init__(self, output: SafeOutputFile, entry: ArchiveEntry):
+        self.output, self.entry = output, entry
+        self.handle = output.handle
         if entry.size == 0:
-            self.handle.close()
+            self.output.seal()
+
+    @property
+    def length(self) -> int:
+        return self.output.length
 
     def write(self, data: bytes | bytearray) -> int:
         if self.length + len(data) > self.entry.size:
             raise ArchiveError(f"7z member exceeds its declared size: {self.entry.name!r}")
-        count = self.handle.write(data)
-        self.length += count
-        with self.lock:
-            self.ctx.progress.chunk(count)
-            self.ctx.report.bytes_written += count
+        count = self.output.write(data)
         if self.length == self.entry.size:
-            # Release completed member fds even with older factory adapters.
-            self.handle.close()
+            # Release descriptors without publishing before py7zr's CRC gate.
+            self.output.seal()
         return count
 
     def read(self, size: int | None = None) -> bytes:
-        if self.handle.closed:
+        if self.handle is None or self.handle.closed:
             return b""
         return self.handle.read(-1 if size is None else size)
 
     def seek(self, offset: int, whence: int = 0) -> int:
-        if self.handle.closed and offset == 0 and whence == 0:
+        if (self.handle is None or self.handle.closed) and offset == 0 and whence == 0:
             return 0  # MemIO rewinds completed writers before its close hook.
+        if self.handle is None:
+            raise ArchiveError(f"7z output writer is unavailable: {self.entry.name!r}")
         return self.handle.seek(offset, whence)
 
     def flush(self) -> None:
-        if not self.handle.closed:
+        if self.handle is not None and not self.handle.closed:
             self.handle.flush()
 
     def close(self) -> None:
-        if not self.handle.closed:
-            self.handle.close()
+        self.output.seal()
+
+    def abort(self) -> None:
+        self.output.abort()
 
     def size(self) -> int:
         return self.length
@@ -456,12 +460,10 @@ class _SevenZipWriters:
             return self._skip(entry)
         if entry.is_symlink:
             return _LinkWriter()
-        if not _prepare_file_target(target, self.ctx.overwrite):
-            return self._skip(entry)
-        flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_BINARY", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        handle = os.fdopen(os.open(target, flags, 0o600), "w+b")
-        return _DiskWriter(handle, entry, self.ctx, self.lock)
+        output = SafeOutputFile(self.ctx, entry, target)
+        if output.skipped:
+            return self.library.io.NullIO()
+        return _DiskWriter(output, entry)
 
     def _skip(self, entry: ArchiveEntry):
         self.ctx.report.skipped.append(entry.name)
@@ -486,16 +488,14 @@ class _SevenZipWriters:
         if product.length != entry.size:
             raise ArchiveError(f"truncated 7z member: {entry.name!r}")
         product.close()
-        _check_inside(self.ctx.dest_real, target)
-        if target.is_symlink() or not target.is_file():
-            raise UnsafeArchiveError(f"7z output changed during extraction: {entry.name!r}")
-        _apply_metadata(target, entry.mode, entry.mtime, self.ctx.preserve_metadata)
-        self.ctx.report.files += 1
 
-    def close(self):
+    def close(self, abort: bool = False):
         for entry, target, product in self.products.values():
-            if isinstance(product, _DiskWriter) and not product.handle.closed:
-                product.handle.close()
+            if isinstance(product, _DiskWriter):
+                if abort:
+                    product.abort()
+                else:
+                    product.close()
 
 
 class SevenZipBackend:
@@ -631,27 +631,41 @@ class SevenZipBackend:
 
     def extract(self, path: Path, ctx: _ExtractContext, password: str | None = None) -> None:
         library = self._library()
+        factory = None
+        complete = False
         try:
-            with library.SevenZipFile(path, "r", password=password) as archive:
+            # Passing a file object is py7zr's public way to avoid parallel
+            # workers, which could outlive an interrupted join and cleanup.
+            with path.open("rb") as source, library.SevenZipFile(source, "r", password=password) as archive:
                 if archive.needs_password() and password is None:
                     raise ArchiveError("7z archive requires a password; use --password or --password-file")
                 entries = self._entries(archive)
                 selected = self._validate_entries(archive, entries, ctx)
                 ctx.progress.start(sum(e.size for e in selected if not e.is_dir and not e.is_symlink), len(selected))
                 factory = self._factory(library, selected, ctx)
-                try:
-                    for entry in selected:
-                        if entry.is_dir:
-                            ctx.progress.item(entry.name)
-                            _extract_entry(ctx, entry)
-                    targets = [entry.name for entry in selected if not entry.is_dir]
-                    if targets:
-                        archive.extract(targets=targets, recursive=False, factory=factory)
-                    factory.finish()
-                finally:
-                    factory.close()
+                for entry in selected:
+                    if entry.is_dir:
+                        ctx.progress.item(entry.name)
+                        _extract_entry(ctx, entry)
+                targets = []
+                for entry in selected:
+                    if entry.is_dir:
+                        continue
+                    target = _resolve_member(ctx.dest_real, entry.name, ctx.strip)
+                    if not ctx.overwrite and target is not None and os.path.lexists(target):
+                        ctx.report.skipped.append(entry.name)
+                        continue
+                    targets.append(entry.name)
+                if targets:
+                    archive.extract(targets=targets, recursive=False, factory=factory)
+            # Validate all payloads and reader close before the engine commits.
+            factory.finish()
+            complete = True
         except Exception as exc:
             self._raise_error(exc, password)
+        finally:
+            if factory is not None:
+                factory.close(abort=not complete)
 
     @staticmethod
     def _validate_entries(archive, entries: list[ArchiveEntry], ctx: _ExtractContext):
@@ -699,7 +713,7 @@ class SevenZipBackend:
             def finish(self):
                 writers.finish()
 
-            def close(self):
-                writers.close()
+            def close(self, abort: bool = False):
+                writers.close(abort=abort)
 
         return SafeFactory()

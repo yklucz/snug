@@ -11,6 +11,7 @@ import math
 import os
 import queue
 import re
+import secrets
 import shutil
 import stat
 import sys
@@ -909,6 +910,7 @@ class ArchiveEntry:
     mode: int | None = None
     mtime: float | None = None
     is_hardlink: bool = False
+    size_known: bool = True
 
 
 # --------------------------------------------------------------------------- #
@@ -926,6 +928,116 @@ class _ExtractContext:
     report: ExtractReport
     progress: ProgressSink
     deferred_dirs: list[tuple[Path, int | None, float | None]] = field(default_factory=list)
+    pending_outputs: list[SafeOutputFile] = field(default_factory=list)
+    deferred_hardlinks: list[tuple[ArchiveEntry, Path, str | None]] = field(default_factory=list)
+
+
+class SafeOutputFile:
+    """Stage bounded chunks; publish only a sealed, validated regular file.
+
+    A no-overwrite publication uses an exclusive hard link. Filesystems without
+    that operation fail closed, rather than exposing an exclusive-create copy
+    while it is incomplete. Parent directories must not be concurrently moved
+    by an untrusted process; portable path checks are not a filesystem sandbox.
+    """
+
+    def __init__(self, ctx: _ExtractContext, entry: ArchiveEntry, target: Path):
+        self.ctx, self.entry, self.target = ctx, entry, target
+        self.length = 0
+        self.handle = None
+        self.temporary: Path | None = None
+        self.committed = False
+        self.skipped = False
+        _prepare_target(ctx.dest_real, target)
+        if not ctx.overwrite and os.path.lexists(target):
+            self.skipped = True
+            ctx.report.skipped.append(entry.name)
+            return
+        if target.is_dir() and not target.is_symlink():
+            raise ArchiveError(f"cannot atomically replace directory with file: {entry.name!r}")
+        flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
+        # A fixed, short basename also works for NAME_MAX-length destinations.
+        for _ in range(32):
+            temporary = target.parent / ('.snug-part-' + secrets.token_hex(12))
+            try:
+                fd = os.open(temporary, flags, 0o600)
+            except FileExistsError:
+                continue
+            self.temporary = temporary
+            try:
+                self.handle = os.fdopen(fd, 'w+b')
+            except BaseException:
+                os.close(fd)
+                temporary.unlink(missing_ok=True)
+                raise
+            break
+        if self.handle is None:
+            raise ArchiveError(f"cannot create extraction staging file: {entry.name!r}")
+        ctx.pending_outputs.append(self)
+
+    def write(self, data: bytes | bytearray) -> int:
+        if self.skipped:
+            return len(data)
+        if self.handle is None or self.handle.closed:
+            raise ArchiveError(f"extraction writer is closed: {self.entry.name!r}")
+        count = self.handle.write(data)
+        if count != len(data):
+            raise ArchiveError(f"incomplete output write: {self.entry.name!r}")
+        self.length += count
+        self.ctx.progress.chunk(count)
+        self.ctx.report.bytes_written += count
+        return count
+
+    def seal(self) -> None:
+        if self.skipped or self.handle is None or self.handle.closed:
+            return
+        try:
+            self.handle.flush()
+            try:
+                os.fsync(self.handle.fileno())
+            except OSError:
+                pass
+        finally:
+            self.handle.close()
+        if self.entry.size_known and self.length != self.entry.size:
+            raise ArchiveError(f"incomplete archive member {self.entry.name!r}: expected {self.entry.size} bytes, read {self.length}")
+
+    def commit(self) -> None:
+        if self.skipped or self.committed or self.temporary is None:
+            return
+        self.seal()
+        _check_inside(self.ctx.dest_real, self.target.parent)
+        if self.target.is_dir() and not self.target.is_symlink():
+            if not self.ctx.overwrite:
+                self.skipped = True
+                self.ctx.report.skipped.append(self.entry.name)
+                self.abort()
+                return
+            raise ArchiveError(f"cannot atomically replace directory with file: {self.entry.name!r}")
+        if self.ctx.overwrite:
+            os.replace(self.temporary, self.target)
+        else:
+            try:
+                os.link(self.temporary, self.target)
+            except FileExistsError:
+                self.skipped = True
+                self.ctx.report.skipped.append(self.entry.name)
+                self.abort()
+                return
+            except OSError as exc:
+                raise ArchiveError(f"exclusive atomic file publication is unavailable for {self.entry.name!r}: {exc}") from exc
+            self.temporary.unlink()
+        self.committed = True
+        _apply_metadata(self.target, self.entry.mode, self.entry.mtime, self.ctx.preserve_metadata)
+        self.ctx.report.files += 1
+
+    def abort(self) -> None:
+        try:
+            if self.handle is not None and not self.handle.closed:
+                self.handle.close()
+        finally:
+            if self.temporary is not None:
+                self.temporary.unlink(missing_ok=True)
 
 
 def _extract_entry(ctx: _ExtractContext, entry: ArchiveEntry, chunks=None,
@@ -971,6 +1083,11 @@ def _extract_symlink_entry(ctx: _ExtractContext, entry: ArchiveEntry, target: Pa
 
 def _extract_hardlink(ctx: _ExtractContext, entry: ArchiveEntry, target: Path,
                       hardlink: str | None) -> None:
+    ctx.deferred_hardlinks.append((entry, target, hardlink))
+
+
+def _commit_hardlink(ctx: _ExtractContext, entry: ArchiveEntry, target: Path,
+                     hardlink: str | None) -> None:
     name = hardlink if hardlink is not None else entry.link_target
     source = _resolve_member(ctx.dest_real, name or "", ctx.strip)
     if source is None:
@@ -993,19 +1110,14 @@ def _extract_hardlink(ctx: _ExtractContext, entry: ArchiveEntry, target: Path,
 
 def _extract_regular_file(ctx: _ExtractContext, entry: ArchiveEntry, target: Path,
                           chunks: Iterable[bytes] | None) -> None:
-    if not _prepare_file_target(target, ctx.overwrite):
-        ctx.report.skipped.append(entry.name)
+    output = SafeOutputFile(ctx, entry, target)
+    if output.skipped:
         return
     if chunks is None:
         raise ArchiveError(f"no data reader for {entry.name!r}")
-    with target.open("wb") as dst:
-        for buf in chunks:
-            dst.write(buf)
-            ctx.progress.chunk(len(buf))
-            ctx.report.bytes_written += len(buf)
-    _check_inside(ctx.dest_real, target)
-    _apply_metadata(target, entry.mode, entry.mtime, ctx.preserve_metadata)
-    ctx.report.files += 1
+    for buf in chunks:
+        output.write(buf)
+    output.seal()
 
 
 def _tar_compress_kwargs(fmt: ArchiveFormat, level: int | None) -> dict:
@@ -1068,7 +1180,11 @@ class NativeBackend:
             try:
                 with zipfile.ZipFile(path) as zf:
                     return all(i.compress_type in _native_zip_methods() for i in zf.infolist())
-            except (OSError, zipfile.BadZipFile):
+            except zipfile.BadZipFile as exc:
+                # A tolerant fallback may read local records from a truncated
+                # ZIP while silently accepting its missing central directory.
+                raise ArchiveError(f"invalid ZIP structure: {exc}") from exc
+            except OSError:
                 return False
         return False
 
@@ -1286,22 +1402,10 @@ class NativeBackend:
 
     @staticmethod
     def _extract_zip_file(zf, info, target, mode, ctx: _ExtractContext, password=None) -> None:
-        _prepare_target(ctx.dest_real, target)
-        if not _prepare_file_target(target, ctx.overwrite):
-            ctx.report.skipped.append(info.filename)
-            return
-
-        with zf.open(info, pwd=_password_bytes(password)) as src, open(target, "wb") as dst:
-            while True:
-                buf = src.read(CHUNK_SIZE)
-                if not buf:
-                    break
-                dst.write(buf)
-                ctx.progress.chunk(len(buf))
-                ctx.report.bytes_written += len(buf)
-
-        _apply_metadata(target, mode, _zip_mtime(info), ctx.preserve_metadata)
-        ctx.report.files += 1
+        def chunks():
+            with zf.open(info, pwd=_password_bytes(password)) as src:
+                yield from iter(lambda: src.read(CHUNK_SIZE), b'')
+        _extract_entry(ctx, _zip_entry(info), chunks=chunks())
 
     # -- TAR extraction -------------------------------------------------- #
 
@@ -1318,6 +1422,11 @@ class NativeBackend:
             for member in members:
                 ctx.progress.item(member.name)
                 self._extract_tar_member(tf, member, ctx)
+            # TAR's end marker can precede a compression trailer. Consume the
+            # remaining decoder stream before publishing any staged payload.
+            if isinstance(tf.fileobj, (gzip.GzipFile, bz2.BZ2File, lzma.LZMAFile)):
+                while tf.fileobj.read(CHUNK_SIZE):
+                    pass
 
     def _extract_tar_member(self, tf, member: tarfile.TarInfo,
                             ctx: _ExtractContext) -> None:
@@ -1360,27 +1469,13 @@ class NativeBackend:
 
     @staticmethod
     def _extract_tar_file(tf, member, target, ctx: _ExtractContext) -> None:
-        _prepare_target(ctx.dest_real, target)
-        if not _prepare_file_target(target, ctx.overwrite):
-            ctx.report.skipped.append(member.name)
-            return
-
-        src = tf.extractfile(member)
-        if src is None:
-            ctx.report.skipped.append(member.name)
-            return
-
-        with src, open(target, "wb") as dst:
-            while True:
-                buf = src.read(CHUNK_SIZE)
-                if not buf:
-                    break
-                dst.write(buf)
-                ctx.progress.chunk(len(buf))
-                ctx.report.bytes_written += len(buf)
-
-        _apply_metadata(target, member.mode, member.mtime, ctx.preserve_metadata)
-        ctx.report.files += 1
+        def chunks():
+            src = tf.extractfile(member)
+            if src is None:
+                raise ArchiveError(f"unreadable archive member: {member.name!r}")
+            with src:
+                yield from iter(lambda: src.read(CHUNK_SIZE), b'')
+        _extract_entry(ctx, _tar_entry(member), chunks=chunks())
 
 
 # --------------------------------------------------------------------------- #
@@ -1704,7 +1799,15 @@ class ArchiveEngine:
                 overwrite=overwrite, preserve_metadata=preserve_metadata,
                 symlinks=symlinks, strip=strip_components, report=report, progress=progress)
             start = time.monotonic()
-            backend.extract(path, ctx, password=password)
+            try:
+                backend.extract(path, ctx, password=password)
+                for output in ctx.pending_outputs:
+                    output.commit()
+                for entry, target, hardlink in ctx.deferred_hardlinks:
+                    _commit_hardlink(ctx, entry, target, hardlink)
+            finally:
+                for output in ctx.pending_outputs:
+                    output.abort()
             for directory, mode, mtime in sorted(ctx.deferred_dirs,
                                                   key=lambda item: len(item[0].parts), reverse=True):
                 _check_inside(ctx.dest_real, directory)
