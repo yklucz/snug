@@ -4,6 +4,8 @@
 
 First distinguish a managed launcher from a source/pip command. Managed errors begin with `Snug dependency error:` and concern startup checks or repair. Source CLI errors generally begin with `error:`. See [Installation](installation.md) for setup and [Runtime management](runtime.md) for repair behavior.
 
+Start with `snug doctor` and `snug formats` when Python can launch Snug. `doctor --json` and `formats --json` provide schema-versioned reports. These commands are offline and read-only: they do not check for updates, repair dependencies, or download missing components. An unavailable optional backend can be healthy in a source/pip environment; broken required managed components make doctor exit with status 2. A missing managed interpreter still requires installation/repair outside diagnostics.
+
 ## `snug: command not found` and Windows PATH
 
 On macOS/Linux, the default launcher is `~/.local/bin/snug`. Check it directly, then add its directory to your shell profile:
@@ -95,7 +97,7 @@ libarchive provides fallback 7z extraction when py7zr is unavailable, but 7z cre
 
 Errors can include `cannot determine archive format`, `the installed backend cannot read this FORMAT archive or its compression method`, `FORMAT creation is not supported; choose a writable format`, or a more specific decoder error.
 
-Check the [format matrix and limits](supported-formats.md). Missing backends require installation; unsupported codecs require a suitable native build or conversion with a tool that supports the original archive. Use `--format` only for creation with an unknown output suffix; extraction has no format override. Renaming an unsupported archive does not add a decoder. A header that is detected successfully may still be truncated or corrupt.
+Check `snug formats` and the [format matrix and limits](supported-formats.md). Missing backends require installation; unsupported codecs require a suitable native build or conversion with a tool that supports the original archive. Use `--format` only for creation with an unknown output suffix; extraction has no format override. Renaming an unsupported archive does not add a decoder. A header that is detected successfully may still be truncated or corrupt; `snug test ARCHIVE` consumes payloads to check decoder-supported integrity.
 
 For `standalone compression requires exactly one regular file`, supply one regular file or use a TAR variant for directories/multiple sources. For `thin AR archives reference external files and are unsupported`, obtain a self-contained regular AR archive instead.
 
@@ -109,7 +111,15 @@ snug extract backup.7z -C output/ --symlinks skip
 
 `7z junction extraction is unsupported` cannot be fixed by granting symlink privileges. `7z creation cannot store a dangling symbolic link` means that py7zr cannot store that source link; use ZIP/TAR or skip it.
 
-`error: unsafe archive:` indicates a rejected path or link, including traversal, absolute paths, escaping symlinks, or 7z output collisions. Use a clean destination when existing links cause containment failures. There is no switch to bypass the [security checks](security.md). A failed extraction may already have written some entries; inspect or discard its output before retrying.
+`error: unsafe archive:` indicates a rejected path or link, including traversal, absolute paths, escaping symlinks, or duplicate output paths. Use a clean destination when existing links cause containment failures. There is no switch to bypass the [security checks](security.md). Regular-file payloads stay staged until decoding succeeds, but a failed extraction can still leave directories, links, or files committed before a later publication failure. Inspect its output before retrying.
+
+## Limits and destination publication failures
+
+An explicit extraction limit violation exits with status 4. Check the selected entry count and declared/decoded byte limits before increasing a bound. `--max-files` counts selected archive entries, including directories and links; declared-size preflight can count entries later skipped. Use `--member` to narrow selection. Ratio metadata is unavailable for some formats, so combine ratio limits with total/per-member byte limits. See [Usage](usage.md#extraction-limits) for exact units; `1M` is decimal and `1MiB` is binary.
+
+`cannot atomically replace directory with file` means a regular-file member conflicts with a destination directory. Choose another destination or use `--no-overwrite`. `exclusive atomic file publication is unavailable` means the filesystem cannot perform the hard-link publication used by `--no-overwrite`; Snug fails safely instead of copying incomplete data to the final path. Use a destination on a filesystem that supports the operation.
+
+A locked destination, especially on Windows, can prevent replacement after the new payload is validated. Close the application holding it or choose another destination; the old regular-file target is retained if replacement fails. Handled failures attempt every staging cleanup. Process kills, power loss, or filesystem cleanup errors can leave `.snug-part-*` files; inspect them before removal. These guarantees apply per regular file, not as rollback of the entire extraction.
 
 ## Password and encrypted-archive failures
 
@@ -151,5 +161,7 @@ For a custom Unix prefix, use the same `SNUG_PREFIX` as the original installatio
 ## Running offline
 
 A managed installation whose startup checks pass does not download anything during ordinary launch. If checks fail offline, reconnect to repair first—even if the requested command uses only ZIP or TAR. Source installations do not run automatic repair and can use already installed backends offline.
+
+`doctor` and `formats` bypass managed repair when an existing Python is available, so they can report broken optional components offline. Unlike archive commands, they also bypass periodic update checks and do not write updater state.
 
 Neither installers nor repair are a general offline bootstrap system. Successful local archive commands do not demonstrate that an unavailable download or a fresh platform install works.

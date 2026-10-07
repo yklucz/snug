@@ -6,7 +6,7 @@
 
 `main` remains the default branch and the primary macOS/Linux project. Shared CLI, archive formats, `ArchiveEngine`, extraction security, and backend APIs originate there. This secondary `windows` branch maintains the PowerShell installer/launcher, managed Windows runtime, native dependency handling, Windows tests, and Windows CI. Port relevant shared commits intentionally, typically by cherry-picking after review; do not fork the archive engine into two independent implementations.
 
-Preserve full explicit commands and the terminal TUI. Snug has no desktop shell extensions, native graphical pickers, file associations, or GUI wrappers.
+Snug remains a CLI and terminal TUI. Keep `create`, `extract`, `list`, `info`, `test`, `doctor`, `formats`, and `update` explicit, retain the no-argument terminal menu, and pass paths as argument values. Terminal-inserted paths need quoting appropriate to the caller's shell; they do not require desktop integration. Do not introduce graphical pickers, desktop launchers, file associations, implicit path commands, or command aliases.
 
 ## Environment and checks
 
@@ -73,7 +73,7 @@ A future `src/snug/` package may separate the CLI, core policy, runtime manageme
 
 ## Tests and fixture provenance
 
-The suite groups native formats, CLI behavior, extraction security, optional backends, terminal UI/path handling, updater metadata/state/failure cases, managed runtime helpers, and Windows bootstrap behavior. Optional tests use import/availability skips when py7zr or native libarchive cannot load. Symlink tests may skip when privileges are missing; Windows bootstrap tests require a Windows host and the explicit `SNUG_WINDOWS_LIVE_BOOTSTRAP=1` gate because they download locked Python/native artifacts. Run the gated test against a disposable temporary installation; it does not update your installed Snug. Normal updater/archive/path tests use mocked networking or disabled automatic checks. Review skips before making backend or cross-platform claims.
+The suite groups native formats, CLI behavior, extraction transactions/limits/security, unified inspection, payload integrity, offline diagnostics/capabilities, optional backends, terminal UI/path handling, managed runtime helpers, and the updater. Failure tests cover corrupted/truncated payloads, wrong passwords, write/close/cleanup faults, interrupts, destination preservation, and no-overwrite races. Limit tests include unavailable/lying metadata and actual-byte overflow. Optional tests use import/availability skips when py7zr or native libarchive cannot load. Symlink tests may skip when privileges are missing. Windows PowerShell diagnostic tests require a Windows host. The bootstrap/password/DLL-repair test additionally requires the explicit `SNUG_WINDOWS_LIVE_BOOTSTRAP=1` gate because it downloads locked Python/native artifacts. Run that gated test against a disposable temporary installation; it does not update an installed Snug. Normal updater/archive/path tests use mocked networking or disabled automatic checks. Review skips before making backend or cross-platform claims.
 
 Fixture provenance is documented in [tests/fixtures/README.md](../tests/fixtures/README.md), with byte sizes, SHA256 hashes, and upstream URLs in [manifest.json](../tests/fixtures/manifest.json). Independent `test_read_format_*` archives come from the official libarchive v3.8.1 tests, decoded from uuencoded files; the ISO fixture was also decompressed from Unix `.Z`. Original licensing and notices are retained beside the fixtures. The XAR and traditional encrypted ZIP samples were generated independently with libarchive-c and have locally generated MIT-licensed content. Tests also generate native, adversarial, CPIO/7z, and AR/DEB archives at runtime.
 
@@ -81,21 +81,23 @@ For new fixtures, record exact provenance and hashes, retain required licenses, 
 
 ## Coding expectations
 
-Preserve Python 3.10 compatibility, annotations, the separation between UI and archive logic, lazy optional imports, and bounded payload I/O. Route extraction through shared safety helpers or checked writers; do not add unrestricted backend extraction. Escape untrusted output and redact passwords in backend errors. Keep failure messages actionable and make skipped entries explicit.
+Preserve Python 3.10 compatibility, annotations, the separation between UI and archive logic, lazy optional imports, and bounded payload I/O. Route regular-file extraction through `SafeOutputFile` and the shared byte budget; do not add unrestricted backend extraction or remove an existing regular target before commit. Preserve primary failures while attempting all staging cleanup. CLI and TUI must pass the same engine settings. Escape untrusted output and redact passwords in backend errors. Keep failure messages actionable and make skipped entries explicit.
 
 Creation must preserve existing archives on backend failure, clean staging files where possible, and retain the engine's temporary-file replacement lifecycle. Keep metadata claims limited to fields actually established by the backend. Use the [Architecture](architecture.md) and [Security](security.md) pages as design context.
 
+`test` must consume payloads rather than merely list headers, with no extracted files or whole-member buffering. `doctor`/`formats` must remain offline and read-only; test that they bypass update checks and repairs. `update` must not instantiate `ArchiveEngine`. Keep capability reports based on backend declarations and actual native registration results, with codec/encryption limits stated separately.
+
 ## Add a backend or supported format
 
-1. Implement the `ArchiveBackend` contract: name, read/write format sets, availability, `can_read`, `can_write`, listing, metadata, creation, and checked extraction. An optional nonrecursive `detect` hook can assist content detection.
+1. Implement the `ArchiveBackend` contract: name, read/write format sets, availability, `can_read`, `can_write`, unified `inspect` returning `ArchiveInspection`, bounded payload `test`, creation, and checked extraction. Keep `list_entries` and `metadata` compatible through inspection. An optional nonrecursive `detect` hook can assist content detection.
 2. Register the backend in `_backends()` in the intended preference order. Keep imports lazy and ensure unavailable optional dependencies do not break native source usage.
 3. For a new format, update `ArchiveFormat`, suffix mappings, appropriate signature/backend detection, capability sets, and helpful errors. Creation format choices come from the enum, so read-only formats must still reject writes correctly.
-4. Add round trips for writable formats and independent fixtures for readers. Cover wrong/missing dependencies, renamed inputs, unsupported codecs/encryption, progress, metadata, links, malformed paths, overwrite policies, and failed creation without partial final output. Check creation rejection for read-only formats.
+4. Add round trips for writable formats and independent fixtures for readers. Cover wrong/missing dependencies, renamed inputs, unsupported codecs/encryption, progress, metadata, links, malformed paths, duplicate outputs, overwrite races, extraction limits, payload-test failures, and staging cleanup without partial final output. Check creation rejection for read-only formats.
 5. Update optional dependencies and runtime checks only when necessary. If managed artifacts change, follow the [runtime update procedure](runtime.md#runtime-update-procedure), including wheel ABI coverage and native DLL/license manifests.
 6. Update the [format matrix](supported-formats.md), [Usage](usage.md), and relevant installation/troubleshooting guidance. Run checks with the optional backend present and absent, and validate actual platform workflows before expanding platform claims.
 
 If format support changes, update the tests and provenance together. A new libarchive release advertising a reader is insufficient by itself to claim new Snug support.
 
-## Current scope and deferred work
+## Reliability scope and deferred work
 
-This checkout provides `create`, `extract`, `list`, `info`, and `update`, plus the existing terminal TUI. Shared updater checks/preferences work on Windows; manual Windows self-update reports external-installation guidance. See [Updates](updates.md) for PowerShell reinstall instructions and `%LOCALAPPDATA%\Snug\state\update.json`. Transactional extraction, global resource limits, `snug test`, `snug doctor`, `snug formats`, completion, batch extraction, and broader TUI changes remain deferred. Do not document those commands as implemented.
+The reliability implementation adds shared regular-file transactions, explicit extraction limits, unified inspection, `test`, `doctor`, `formats`, and terminal create/extract/test options. It preserves the updater and platform branch split. Windows checks/preferences remain shared; manual Windows self-update reports external-installation guidance. See [Updates](updates.md) for PowerShell reinstall instructions and `%LOCALAPPDATA%\Snug\state\update.json`. Shell completion, batch extraction redesign, archive editing, new formats, cloud/URL inputs, and desktop integration remain outside this phase. Change the version only after shared implementation, docs, main verification, and the Windows port are complete.
