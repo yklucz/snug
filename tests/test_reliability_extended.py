@@ -273,3 +273,51 @@ def test_optional_empty_file_obeys_zero_byte_limits(engine, tmp_path, request, s
         max_entries=1, max_total_size=0, max_file_size=0, max_ratio=1))
     assert report.files == 1 and report.bytes_written == 0
     assert (tmp_path / "out/empty.txt").read_bytes() == b""
+
+
+@pytest.mark.parametrize("encrypted", [False, True])
+def test_sevenzip_inspection_has_entries_and_metadata_in_one_open(tmp_path, py7zr_backend, monkeypatch, encrypted):
+    password = "inspection password" if encrypted else None
+    archive = seven_archive(py7zr_backend, tmp_path, password)
+    initialize = py7zr_backend.SevenZipFile.__init__
+    opens = []
+
+    def counted_open(self, *args, **kwargs):
+        opens.append(args[1] if len(args) > 1 else kwargs.get("mode", "r"))
+        initialize(self, *args, **kwargs)
+
+    monkeypatch.setattr(py7zr_backend.SevenZipFile, "__init__", counted_open)
+    inspection = SevenZipBackend().inspect(archive, password)
+    assert isinstance(inspection, core.ArchiveInspection)
+    assert [entry.name for entry in inspection.entries] == ["payload.txt"]
+    assert inspection.metadata == {"format": "7z", "encrypted": encrypted}
+    assert opens == ["r"]
+
+
+@pytest.mark.parametrize("backend_type", [SevenZipBackend, LibarchiveBackend])
+def test_optional_legacy_inspection_wrappers_remain_compatible(monkeypatch, tmp_path, backend_type):
+    backend = backend_type()
+    inspection = core.ArchiveInspection([core.ArchiveEntry("payload.txt", size=10)], {"format": "fixture"})
+    calls = []
+
+    def inspect(path, password=None):
+        calls.append((path, password))
+        return inspection
+
+    monkeypatch.setattr(backend, "inspect", inspect)
+    path = tmp_path / "unused.archive"
+    assert backend.list_entries(path, "password") == inspection.entries
+    assert backend.metadata(path, "password") == inspection.metadata
+    assert calls == [(path, "password"), (path, "password")]
+
+
+def test_libarchive_inspection_marks_special_entries_without_extracting_them(engine, tmp_path, libarchive_backend):
+    archive = tmp_path / "pipe.cpio"
+    with libarchive_backend.file_writer(str(archive), "cpio_newc") as writer:
+        writer.add_file_from_memory("pipe", 0, b"", filetype=stat.S_IFIFO)
+    inspection = LibarchiveBackend().inspect(archive)
+    assert len(inspection.entries) == 1 and inspection.entries[0].is_special
+    output = tmp_path / "out"
+    report = engine.extract(archive, output)
+    assert report.files == 0 and report.skipped == ["pipe"]
+    assert not (output / "pipe").exists()

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable, NoReturn, cast
 
 from snug_core import (
-    ArchiveEntry, ArchiveError, ArchiveFormat, CHUNK_SIZE, CreateReport,
+    ArchiveEntry, ArchiveError, ArchiveFormat, ArchiveInspection, CHUNK_SIZE, CreateReport,
     ProgressSink, SafeOutputFile, UnsafeArchiveError, _ExtractContext,
     _extract_entry, _prepare_target, _resolve_member,
     _selected, _detect_by_magic,
@@ -170,6 +170,7 @@ class LibarchiveBackend:
             name=_text(entry.pathname), size=max(0, entry.size or 0),
             is_dir=bool(entry.isdir), is_symlink=bool(entry.issym),
             is_hardlink=bool(entry.islnk),
+            is_special=not (entry.isdir or entry.issym or entry.islnk or entry.isreg),
             link_target=_text(entry.linkpath) if entry.issym or entry.islnk else None,
             mode=entry.mode, mtime=entry.mtime, size_known=entry.size is not None,
         )
@@ -188,7 +189,7 @@ class LibarchiveBackend:
             return None
         return bool(result) if result >= 0 else None
 
-    def _inspect(self, path: Path, password: str | None):
+    def inspect(self, path: Path, password: str | None = None) -> ArchiveInspection:
         library = self._library()
         entries: list[ArchiveEntry] = []
         try:
@@ -207,7 +208,7 @@ class LibarchiveBackend:
                 encrypted = self._encryption(library, reader)
                 if encrypted is not None:
                     metadata["encrypted"] = encrypted
-                return entries, metadata
+                return ArchiveInspection(entries, metadata)
         except ArchiveError:
             raise
         except Exception as exc:
@@ -223,14 +224,15 @@ class LibarchiveBackend:
         raise ArchiveError(f"libarchive could not read {path.name!r}: {message}") from exc
 
     def list_entries(self, path: Path, password: str | None = None) -> list[ArchiveEntry]:
-        return self._inspect(path, password)[0]
+        return self.inspect(path, password).entries
 
     def metadata(self, path: Path, password: str | None = None) -> dict:
-        return self._inspect(path, password)[1]
+        return self.inspect(path, password).metadata
 
     def extract(self, path: Path, ctx: _ExtractContext, password: str | None = None) -> None:
         library = self._library()
-        entries, metadata = self._inspect(path, password)
+        inspection = ctx.inspection or self.inspect(path, password)
+        entries, metadata = inspection.entries, inspection.metadata
         for entry in entries:
             _resolve_member(ctx.dest_real, entry.name, ctx.strip)
         if metadata.get("format") in ("rar", "rar5") and metadata.get("encrypted"):
@@ -577,21 +579,20 @@ class SevenZipBackend:
             raise ArchiveError("could not read 7z archive: incorrect password or corrupt archive") from exc
         raise ArchiveError(f"py7zr could not process the archive: {message}") from exc
 
-    def list_entries(self, path: Path, password: str | None = None) -> list[ArchiveEntry]:
+    def inspect(self, path: Path, password: str | None = None) -> ArchiveInspection:
         library = self._library()
         try:
             with library.SevenZipFile(path, "r", password=password) as archive:
-                return self._entries(archive)
+                return ArchiveInspection(self._entries(archive),
+                                         {"format": "7z", "encrypted": bool(archive.needs_password())})
         except Exception as exc:
             self._raise_error(exc, password)
 
+    def list_entries(self, path: Path, password: str | None = None) -> list[ArchiveEntry]:
+        return self.inspect(path, password).entries
+
     def metadata(self, path: Path, password: str | None = None) -> dict:
-        library = self._library()
-        try:
-            with library.SevenZipFile(path, "r", password=password) as archive:
-                return {"format": "7z", "encrypted": bool(archive.needs_password())}
-        except Exception as exc:
-            self._raise_error(exc, password)
+        return self.inspect(path, password).metadata
 
     def create(self, path: Path, items: list[tuple[Path, str]], fmt: ArchiveFormat,
                compresslevel: int | None, symlinks: str, report: CreateReport,
