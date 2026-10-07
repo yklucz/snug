@@ -1545,18 +1545,33 @@ def _diagnostic_inventory(directory: Path, *, hashes: bool) -> dict:
     return {**result, "files": len(files)}
 
 
-def _diagnostic_rar5_reader(ffi) -> bool:
-    """Old binding allowlists omit RAR5; require a successful native probe."""
+def _diagnostic_registration(ffi, kind: str, name: str) -> bool:
+    """Require a successful registration on a fresh native archive handle."""
+    import ctypes
+    import re
+    if not re.fullmatch(r"[a-z0-9_]{1,64}", name) or name == "all":
+        return False
+    prefix, new, free = {
+        "reader": ("read_support_format_", "read_new", "read_free"),
+        "filter": ("read_support_filter_", "read_new", "read_free"),
+        "writer": ("write_set_format_", "write_new", "write_free"),
+    }[kind]
     handle = None
     try:
-        probe = ffi.ffi("read_support_format_rar5", [ffi.c_archive_p], ffi.c_int)
-        handle = ffi.read_new()
+        native = getattr(ffi, "libarchive", None)
+        if native is None:
+            probe = ffi.ffi(prefix + name, [ffi.c_archive_p], ffi.c_int)
+        else:
+            # A fresh callable avoids the binding's warning logger and leaves
+            # its shared errcheck handlers untouched for archive operations.
+            probe = ctypes.CFUNCTYPE(ffi.c_int, ffi.c_archive_p)(("archive_" + prefix + name, native))
+        handle = getattr(ffi, new)()
         return bool(handle) and probe(handle) == 0
     except Exception:
         return False
     finally:
         if handle:
-            ffi.read_free(handle)
+            getattr(ffi, free)(handle)
 
 
 def _diagnostic_backends(backends=None) -> list[dict]:
@@ -1596,11 +1611,14 @@ def _diagnostic_backends(backends=None) -> list[dict]:
                     library = getattr(backend, "_library")()
                     ffi = library.ffi
                     native = int(ffi.version_number())
-                    readers = sorted(str(value) for value in ffi.READ_FORMATS)
-                    if "rar5" not in readers and _diagnostic_rar5_reader(ffi):
-                        readers = sorted([*readers, "rar5"])
-                    writers = sorted(str(value) for value in ffi.WRITE_FORMATS)
-                    filters = sorted(str(value) for value in getattr(ffi, "READ_FILTERS", ()))
+                    # Binding sets establish candidate symbols, not whether
+                    # their native registrations succeed in this library build.
+                    readers = sorted(name for name in sorted({*(str(value) for value in ffi.READ_FORMATS), "rar5"})
+                                     if _diagnostic_registration(ffi, "reader", name))
+                    writers = sorted(name for name in sorted({str(value) for value in ffi.WRITE_FORMATS})
+                                     if _diagnostic_registration(ffi, "writer", name))
+                    filters = sorted(name for name in sorted({str(value) for value in getattr(ffi, "READ_FILTERS", ())})
+                                     if _diagnostic_registration(ffi, "filter", name))
                     api = callable(getattr(library, "file_reader", None)) and callable(getattr(library, "file_writer", None))
                     try:
                         binding = importlib.metadata.version("libarchive-c")
@@ -1618,7 +1636,8 @@ def _diagnostic_backends(backends=None) -> list[dict]:
                 else:
                     component["available"] = True
                 if component["available"]:
-                    component["write_formats"] = sorted(fmt.value for fmt in backend.write_formats if backend.can_write(fmt))
+                    component["write_formats"] = sorted(fmt.value for fmt in backend.write_formats if backend.can_write(fmt)
+                        and (backend.name != "libarchive" or getattr(backend, "_write_names", {}).get(fmt) in component["native_writers"]))
             except Exception as exc:
                 component.update(status="broken", available=False, message=_safe(exc))
             result.append(component)

@@ -20,6 +20,53 @@ from snug_core import ArchiveFormat, NativeBackend, StreamBackend
 REAL_ACTIVATE = runtime.activate
 
 
+class DiagnosticFFI:
+    """Exported registration functions can still reject their feature."""
+
+    def __init__(self):
+        self.READ_FORMATS = {"7zip", "ar", "cab", "cpio", "iso9660", "lha", "rar", "rar5", "xar", "warc", "zip"}
+        self.WRITE_FORMATS = {"ar_bsd", "cpio_newc"}
+        self.READ_FILTERS = {"rpm", "gzip"}
+        self.c_archive_p, self.c_int = object(), object()
+        self.results, self.missing_symbols = {}, set()
+        self.allocated, self.released, self.probed = [], [], []
+
+    def version_number(self):
+        return 3008001
+
+    def _new(self, kind):
+        handle = (kind, len(self.allocated))
+        self.allocated.append(handle)
+        return handle
+
+    def read_new(self):
+        return self._new("read")
+
+    def write_new(self):
+        return self._new("write")
+
+    def read_free(self, handle):
+        assert handle[0] == "read"
+        self.released.append(handle)
+
+    def write_free(self, handle):
+        assert handle[0] == "write"
+        self.released.append(handle)
+
+    def ffi(self, name, arguments, result):
+        assert arguments == [self.c_archive_p] and result is self.c_int
+        if name in self.missing_symbols:
+            raise AttributeError("native registration symbol is missing")
+        def register(handle):
+            assert handle in self.allocated and handle not in self.released
+            self.probed.append((name, handle))
+            outcome = self.results.get(name, 0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        return register
+
+
 class OptionalBackend:
     def __init__(self, name, library=None, available=True):
         self.name, self.library, self.installed = name, library, available
@@ -28,6 +75,7 @@ class OptionalBackend:
             ArchiveFormat.DEB, ArchiveFormat.RPM, ArchiveFormat.ISO,
         }
         self.write_formats = {ArchiveFormat.SEVEN_ZIP} if name == "py7zr" else {ArchiveFormat.CPIO, ArchiveFormat.AR}
+        self._write_names = {ArchiveFormat.CPIO: "cpio_newc", ArchiveFormat.AR: "ar_bsd"}
 
     def available(self):
         os.environ["LIBARCHIVE"] = "incidental discovery mutation"
@@ -45,9 +93,7 @@ class OptionalBackend:
 @pytest.fixture
 def libraries(monkeypatch):
     py7zr = SimpleNamespace(__version__="1.1.3", SevenZipFile=lambda *args: None, is_7zfile=lambda *args: True)
-    ffi = SimpleNamespace(version_number=lambda: 3008001,
-                          READ_FORMATS={"7zip", "ar", "cab", "cpio", "iso9660", "lha", "rar", "rar5", "xar", "warc", "zip"},
-                          WRITE_FORMATS={"ar_bsd", "cpio_newc"}, READ_FILTERS={"rpm", "gzip"})
+    ffi = DiagnosticFFI()
     libarchive = SimpleNamespace(ffi=ffi, file_reader=lambda *args: None, file_writer=lambda *args: None)
     modules = {"py7zr.io": SimpleNamespace(WriterFactory=type("WriterFactory", (), {})),
                "Cryptodome.Cipher.AES": SimpleNamespace(new=lambda *args: object())}
@@ -221,6 +267,7 @@ def test_formats_optional_readers_and_writers(backends, libraries):
 
 def test_formats_does_not_infer_rar5_from_rar_reader(backends, libraries):
     libraries[1].ffi.READ_FORMATS.remove("rar5")
+    libraries[1].ffi.missing_symbols.add("read_support_format_rar5")
     rows = formats(snug._formats_report(backends))
     assert rows["rar"]["read"]
     assert not rows["rar5"]["read"]
@@ -237,19 +284,82 @@ def test_native_zipx_capability_has_row_specific_codec_limit():
 def test_rar5_uses_native_reader_evidence(backends, libraries, outcome):
     ffi = libraries[1].ffi
     ffi.READ_FORMATS.remove("rar5")
-    allocated, released = [], []
-    ffi.c_archive_p, ffi.c_int = object(), object()
-    ffi.read_new = lambda: allocated.append("reader") or 123
-    ffi.read_free = lambda reader: released.append(reader)
-    def resolve(name, arguments, result):
-        assert name == "read_support_format_rar5"
-        if outcome == "missing":
-            raise AttributeError("native reader symbol is missing")
-        return lambda reader: 0 if outcome == "supported" else -30
-    ffi.ffi = resolve
+    if outcome == "missing":
+        ffi.missing_symbols.add("read_support_format_rar5")
+    elif outcome == "failed":
+        ffi.results["read_support_format_rar5"] = -30
     row = formats(snug._formats_report(backends))["rar5"]
     assert row["read"] is (outcome == "supported")
-    assert released == ([123] if allocated else [])
+    assert ffi.released == ffi.allocated
+
+
+@pytest.mark.parametrize("kind,name", [("reader", "iso9660"), ("writer", "cpio_newc"), ("filter", "rpm")])
+@pytest.mark.parametrize("outcome", [-20, -30, RuntimeError("native registration failed")])
+def test_formats_require_successful_native_registration(backends, libraries, kind, name, outcome):
+    ffi = libraries[1].ffi
+    prefix = {"reader": "read_support_format_", "writer": "write_set_format_", "filter": "read_support_filter_"}[kind]
+    ffi.results[prefix + name] = outcome
+    rows = formats(snug._formats_report(backends))
+    if kind == "reader":
+        assert not rows["iso"]["read"]
+    elif kind == "writer":
+        assert rows["cpio"]["read"] and not rows["cpio"]["write"]
+    else:
+        assert not rows["rpm"]["read"] and rows["cpio"]["read"]
+    assert ffi.allocated == ffi.released
+    assert len({handle for _, handle in ffi.probed}) == len(ffi.probed)
+
+
+@pytest.mark.parametrize("kind", ["reader", "writer", "filter"])
+def test_native_registration_null_handle_and_bookkeeping_skip(libraries, kind):
+    ffi = libraries[1].ffi
+    assert not snug._diagnostic_registration(ffi, kind, "all")
+    assert not snug._diagnostic_registration(ffi, kind, "bad/name")
+    assert not ffi.allocated
+    if kind == "writer":
+        ffi.write_new = lambda: None
+    else:
+        ffi.read_new = lambda: None
+    assert not snug._diagnostic_registration(ffi, kind, "zip")
+    assert not ffi.probed and not ffi.released
+
+
+def test_native_diagnostic_registration_sets_and_managed_health(tmp_path, backends, libraries, monkeypatch):
+    ffi = libraries[1].ffi
+    ffi.READ_FORMATS.add("all")
+    ffi.READ_FILTERS.add("all")
+    ffi.results["read_support_format_rar"] = -20
+    ffi.results["write_set_format_ar_bsd"] = -30
+    ffi.results["read_support_filter_gzip"] = RuntimeError("codec missing")
+    managed_files(tmp_path, monkeypatch)
+    report = snug._doctor_report(tmp_path, backends)
+    native = component(report, "libarchive")
+    assert not report["ok"] and not native["managed_compatible"]
+    assert "rar" not in native["native_readers"] and "all" not in native["native_readers"]
+    assert "ar_bsd" not in native["native_writers"]
+    assert native["native_filters"] == ["rpm"]
+    assert ffi.allocated == ffi.released
+    assert all(not name.endswith("_all") for name, _ in ffi.probed)
+
+
+@pytest.mark.parametrize("kind,prefix", [("reader", "read_support_format_"),
+                                        ("writer", "write_set_format_"),
+                                        ("filter", "read_support_filter_")])
+@pytest.mark.parametrize("result", [0, -20])
+def test_native_registration_avoids_binding_warning_handlers(libraries, monkeypatch, kind, prefix, result):
+    import ctypes
+    ffi = libraries[1].ffi
+    ffi.libarchive = object()
+    ffi.ffi = lambda *args: pytest.fail("raw registration must not mutate binding handlers")
+    def callable_type(result_type, handle_type):
+        assert result_type is ffi.c_int and handle_type is ffi.c_archive_p
+        def resolve(symbol):
+            assert symbol == ("archive_" + prefix + "zip", ffi.libarchive)
+            return lambda handle: result
+        return resolve
+    monkeypatch.setattr(ctypes, "CFUNCTYPE", callable_type)
+    assert snug._diagnostic_registration(ffi, kind, "zip") is (result == 0)
+    assert ffi.allocated == ffi.released
 
 
 def test_formats_reports_optional_absence_and_restores_environment(backends, monkeypatch):
@@ -334,7 +444,7 @@ def test_unix_launcher_diagnostics_are_offline_without_runtime_repair(tmp_path, 
     sources = {
         vendor / "libarchive/__init__.py": ("raise OSError('fixture broken native library')\n" if not healthy else
             "from types import SimpleNamespace\n"
-            "ffi = SimpleNamespace(version_number=lambda:3008001, READ_FORMATS={'7zip','ar','cab','cpio','iso9660','lha','rar','rar5','xar','warc','zip'}, WRITE_FORMATS={'ar_bsd','cpio_newc'}, READ_FILTERS={'rpm'})\n"
+            "ffi = SimpleNamespace(version_number=lambda:3008001, READ_FORMATS={'7zip','ar','cab','cpio','iso9660','lha','rar','rar5','xar','warc','zip'}, WRITE_FORMATS={'ar_bsd','cpio_newc'}, READ_FILTERS={'rpm'}, c_archive_p=object(), c_int=object(), read_new=lambda:object(), write_new=lambda:object(), read_free=lambda handle:None, write_free=lambda handle:None, ffi=lambda *args:lambda handle:0)\n"
             "def file_reader(*args): pass\n"
             "def file_writer(*args): pass\n"),
         packages / "py7zr/__init__.py": ("raise ImportError('fixture missing py7zr')\n" if not healthy else
