@@ -1,5 +1,6 @@
 """Optional decoders share transactional outputs, including late CRC failures."""
 from contextlib import contextmanager
+from dataclasses import replace
 import os
 import stat
 
@@ -7,7 +8,7 @@ import pytest
 
 import snug
 import snug_core as core
-from snug_ext import LibarchiveBackend
+from snug_ext import LibarchiveBackend, SevenZipBackend
 
 
 PAYLOAD = b"transactional CRC payload: never expose partial content\n"
@@ -70,7 +71,7 @@ def test_sevenzip_failure_keeps_old_file_and_removes_staging(
 
         def failed_close(self):
             close(self)
-            if self.mode == "r":
+            if self.mode == "r" and list(dest.rglob(".snug-part-*")):
                 raise snug.ArchiveError("simulated archive-close validation failure")
 
         monkeypatch.setattr(py7zr_backend.SevenZipFile, "close", failed_close)
@@ -89,7 +90,7 @@ def test_sevenzip_existing_file_is_still_visible_until_archive_closes(
     observations = []
 
     def checked_close(self):
-        if self.mode == "r":
+        if self.mode == "r" and list(dest.rglob(".snug-part-*")):
             observations.append(target.read_bytes())
             assert list(dest.rglob(".snug-part-*"))
         close(self)
@@ -152,8 +153,8 @@ def test_libarchive_failure_keeps_old_file_and_removes_staging(
     else:
         chunks = LibarchiveBackend._entry_chunks
 
-        def failed_chunks(raw, size):
-            for block in chunks(raw, size):
+        def failed_chunks(raw, size, **kwargs):
+            for block in chunks(raw, size, **kwargs):
                 yield block[:7]
                 if failure == "interrupt":
                     raise KeyboardInterrupt()
@@ -163,3 +164,112 @@ def test_libarchive_failure_keeps_old_file_and_removes_staging(
     with pytest.raises(KeyboardInterrupt if failure == "interrupt" else snug.ArchiveError):
         engine.extract(archive, dest)
     assert_clean(dest, target, existing)
+
+
+@pytest.mark.parametrize("suffix,backend", [("7z", "py7zr_backend"), ("cpio", "libarchive_backend")])
+@pytest.mark.parametrize("limit", ["max_entries", "max_total_size", "max_file_size"])
+def test_optional_declared_limits_preserve_destination(engine, tmp_path, request, suffix, backend, limit):
+    request.getfixturevalue(backend)
+    sources = [tmp_path / "payload.txt", tmp_path / "second.txt"]
+    for source in sources:
+        source.write_bytes(PAYLOAD)
+    archive = tmp_path / f"sample.{suffix}"
+    engine.create(archive, sources)
+    dest, target = destination(tmp_path, True)
+    amount = {"max_entries": 1, "max_total_size": len(PAYLOAD) * 2 - 1,
+              "max_file_size": len(PAYLOAD) - 1}[limit]
+    with pytest.raises(core.ResourceLimitError):
+        engine.extract(archive, dest, limits=core.ExtractionLimits(**{limit: amount}))
+    assert_clean(dest, target, True)
+    assert not (dest / "second.txt").exists()
+
+
+@pytest.mark.parametrize("suffix,backend", [("7z", "py7zr_backend"), ("cpio", "libarchive_backend")])
+@pytest.mark.parametrize("size_known", [False, True])
+def test_optional_actual_byte_limits_override_missing_or_lying_metadata(
+    engine, tmp_path, monkeypatch, request, suffix, backend, size_known,
+):
+    request.getfixturevalue(backend)
+    source = tmp_path / "payload.txt"
+    source.write_bytes(PAYLOAD)
+    archive = tmp_path / f"sample.{suffix}"
+    engine.create(archive, [source])
+    dest, target = destination(tmp_path, True)
+    if suffix == "cpio":
+        entry = LibarchiveBackend._entry
+        monkeypatch.setattr(LibarchiveBackend, "_entry", staticmethod(
+            lambda raw: replace(entry(raw), size=1, size_known=size_known)))
+    else:
+        entries = SevenZipBackend._entries
+        monkeypatch.setattr(SevenZipBackend, "_entries", staticmethod(
+            lambda handle: [replace(item, size=1, size_known=size_known) for item in entries(handle)]))
+    with pytest.raises(core.ResourceLimitError, match="file limit"):
+        engine.extract(archive, dest, limits=core.ExtractionLimits(max_file_size=len(PAYLOAD) - 1))
+    assert_clean(dest, target, True)
+
+
+def test_sevenzip_non_solid_ratio_is_enforced(engine, tmp_path, py7zr_backend):
+    source = tmp_path / "payload.txt"
+    source.write_bytes(b"a" * 10000)
+    archive = tmp_path / "sample.7z"
+    engine.create(archive, [source])
+    entries = engine.list_entries(archive)
+    assert len(entries) == 1 and entries[0].compressed_size is not None
+    with pytest.raises(core.ResourceLimitError, match="ratio"):
+        engine.extract(archive, tmp_path / "out", limits=core.ExtractionLimits(max_ratio=2))
+
+
+def test_solid_sevenzip_has_no_invented_per_file_ratio(engine, tmp_path, py7zr_backend):
+    sources = [tmp_path / "one.txt", tmp_path / "two.txt"]
+    for source in sources:
+        source.write_bytes(b"a" * 1000)
+    archive = tmp_path / "solid.7z"
+    engine.create(archive, sources)
+    entries = engine.list_entries(archive)
+    assert len(entries) == 2 and all(entry.compressed_size is None for entry in entries)
+    report = engine.extract(archive, tmp_path / "out", limits=core.ExtractionLimits(max_ratio=1, max_total_size=2000))
+    assert report.files == 2 and report.bytes_written == 2000
+
+
+def test_libarchive_missing_compressed_sizes_skip_ratio_but_keep_byte_limits(engine, tmp_path, libarchive_backend):
+    source = tmp_path / "payload.txt"
+    source.write_bytes(PAYLOAD)
+    archive = tmp_path / "sample.cpio"
+    engine.create(archive, [source])
+    assert engine.list_entries(archive)[0].compressed_size is None
+    report = engine.extract(archive, tmp_path / "out", limits=core.ExtractionLimits(max_ratio=1, max_file_size=len(PAYLOAD)))
+    assert report.files == 1 and report.bytes_written == len(PAYLOAD)
+
+
+def test_sevenzip_symlink_payload_obeys_actual_budget(engine, tmp_path, py7zr_backend, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "target.txt").write_bytes(b"target")
+    try:
+        (source / "link").symlink_to("target.txt")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"platform cannot create symlinks: {exc}")
+    archive = tmp_path / "link.7z"
+    engine.create(archive, [source], root=source)
+    entries = SevenZipBackend._entries
+    monkeypatch.setattr(SevenZipBackend, "_entries", staticmethod(
+        lambda handle: [replace(item, size=0, size_known=False) if item.is_symlink else item
+                        for item in entries(handle)]))
+    dest = tmp_path / "out"
+    with pytest.raises(core.ResourceLimitError, match="file limit"):
+        engine.extract(archive, dest, members=["link"], limits=core.ExtractionLimits(max_file_size=3))
+    assert not (dest / "link").exists() and not (dest / "link").is_symlink()
+    assert not list(dest.rglob(".snug-part-*"))
+
+
+@pytest.mark.parametrize("suffix,backend", [("7z", "py7zr_backend"), ("cpio", "libarchive_backend")])
+def test_optional_empty_file_obeys_zero_byte_limits(engine, tmp_path, request, suffix, backend):
+    request.getfixturevalue(backend)
+    source = tmp_path / "empty.txt"
+    source.touch()
+    archive = tmp_path / f"empty.{suffix}"
+    engine.create(archive, [source])
+    report = engine.extract(archive, tmp_path / "out", limits=core.ExtractionLimits(
+        max_entries=1, max_total_size=0, max_file_size=0, max_ratio=1))
+    assert report.files == 1 and report.bytes_written == 0
+    assert (tmp_path / "out/empty.txt").read_bytes() == b""

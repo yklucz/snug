@@ -23,6 +23,7 @@ import zipfile
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, localcontext
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Literal, Protocol, Sequence
@@ -182,6 +183,80 @@ class UnsafeArchiveError(ArchiveError):
 
 class FormatError(ArchiveError):
     """The archive format could not be determined or is unsupported."""
+
+
+class ResourceLimitError(ArchiveError):
+    """An explicit extraction quota was exceeded."""
+
+
+@dataclass(frozen=True)
+class ExtractionLimits:
+    max_entries: int | None = None
+    max_total_size: int | None = None
+    max_file_size: int | None = None
+    max_ratio: float | None = None
+
+    def __post_init__(self):
+        for value in (self.max_entries, self.max_total_size, self.max_file_size):
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError('extraction counts and sizes must be nonnegative integers')
+        if self.max_ratio is not None and (isinstance(self.max_ratio, bool)
+                or not math.isfinite(self.max_ratio) or self.max_ratio <= 0):
+            raise ValueError('maximum ratio must be a finite positive number')
+
+
+def parse_size(text: str) -> int:
+    """Parse exact byte amounts: decimal K/KB and binary KiB through TiB."""
+    match = re.fullmatch(r'([0-9]+(?:\.[0-9]+)?)(B|[KMGT](?:B|iB)?)?', text) if len(text) <= 128 else None
+    if match is None:
+        raise ValueError('size must be bytes or a decimal K/KB/MB/GB/TB or binary KiB/MiB/GiB/TiB amount')
+    number, unit = match.groups()
+    power = 'KMGT'.index(unit[0]) + 1 if unit and unit[0] in 'KMGT' else 0
+    try:
+        with localcontext() as context:
+            context.prec = 256
+            size = Decimal(number) * ((1024 if unit and unit.endswith('iB') else 1000) ** power)
+        if size != size.to_integral_value():
+            raise ValueError('size must resolve to an exact whole number of bytes')
+        return int(size)
+    except InvalidOperation as exc:
+        raise ValueError('invalid size') from exc
+
+
+class _ExtractionBudget:
+    def __init__(self, limits: ExtractionLimits | None = None):
+        self.limits = limits or ExtractionLimits()
+        self.total = 0
+
+    def preflight(self, entries: Sequence[ArchiveEntry]) -> None:
+        limits = self.limits
+        if limits.max_entries is not None and len(entries) > limits.max_entries:
+            raise ResourceLimitError(f'archive contains {len(entries)} selected entries; limit is {limits.max_entries}')
+        total = 0
+        for entry in entries:
+            if entry.is_dir or entry.is_hardlink or not entry.size_known:
+                continue
+            if entry.size < 0:
+                raise ArchiveError(f'invalid declared member size: {entry.name!r}')
+            total += entry.size
+            self._file(entry, entry.size)
+        if limits.max_total_size is not None and total > limits.max_total_size:
+            raise ResourceLimitError(f'selected archive payload declares {total} bytes; total limit is {limits.max_total_size}')
+
+    def _file(self, entry: ArchiveEntry, size: int) -> None:
+        limits = self.limits
+        if limits.max_file_size is not None and size > limits.max_file_size:
+            raise ResourceLimitError(f'member {entry.name!r} exceeds file limit {limits.max_file_size} bytes')
+        compressed = entry.compressed_size
+        if limits.max_ratio is not None and compressed is not None and compressed >= 0:
+            if (compressed == 0 and size > 0) or (compressed > 0 and size / compressed > limits.max_ratio):
+                raise ResourceLimitError(f'member {entry.name!r} exceeds compression ratio limit {limits.max_ratio:g}')
+
+    def consume(self, entry: ArchiveEntry, previous: int, count: int) -> None:
+        self._file(entry, previous + count)
+        if self.limits.max_total_size is not None and self.total + count > self.limits.max_total_size:
+            raise ResourceLimitError(f'member {entry.name!r} exceeds total limit {self.limits.max_total_size} bytes')
+        self.total += count
 
 
 class _QuitInteractive(Exception):
@@ -927,6 +1002,7 @@ class _ExtractContext:
     strip: int
     report: ExtractReport
     progress: ProgressSink
+    budget: _ExtractionBudget = field(default_factory=_ExtractionBudget)
     deferred_dirs: list[tuple[Path, int | None, float | None]] = field(default_factory=list)
     pending_outputs: list[SafeOutputFile] = field(default_factory=list)
     deferred_hardlinks: list[tuple[ArchiveEntry, Path, str | None]] = field(default_factory=list)
@@ -980,6 +1056,7 @@ class SafeOutputFile:
             return len(data)
         if self.handle is None or self.handle.closed:
             raise ArchiveError(f"extraction writer is closed: {self.entry.name!r}")
+        self.ctx.budget.consume(self.entry, self.length, len(data))
         count = self.handle.write(data)
         if count != len(data):
             raise ArchiveError(f"incomplete output write: {self.entry.name!r}")
@@ -1389,6 +1466,7 @@ class NativeBackend:
         if info.file_size > 65536:
             raise UnsafeArchiveError(f"symlink target is too large: {info.filename!r}")
         payload = zf.read(info, pwd=_password_bytes(password))
+        ctx.budget.consume(_zip_entry(info), 0, len(payload))
         link_target = payload.decode("utf-8", "surrogateescape")
         _prepare_target(ctx.dest_real, target)
         if _make_symlink(ctx.dest_real, target, link_target, ctx.overwrite):
@@ -1598,7 +1676,11 @@ class StreamBackend:
         report.files += 1
 
     def extract(self, archive_path, ctx: _ExtractContext, password=None) -> None:
-        entry = self.list_entries(archive_path, password=password)[0]
+        if password is not None:
+            raise ArchiveError("standalone compression streams do not support passwords")
+        # Unknown decoded size avoids a redundant unbounded preflight decode.
+        entry = ArchiveEntry(self._name(archive_path), compressed_size=archive_path.stat().st_size,
+                             size_known=False)
         if not _selected(entry.name, ctx.members):
             ctx.progress.start(0, 0)
             return
@@ -1780,7 +1862,8 @@ class ArchiveEngine:
                 members: Sequence[str] | Callable[[str], bool] | None = None,
                 overwrite: bool = True, preserve_metadata: bool = True,
                 symlinks: str = "store", strip_components: int = 0,
-                progress: ProgressSink | None = None, password=None) -> ExtractReport:
+                progress: ProgressSink | None = None, password=None,
+                limits: ExtractionLimits | None = None) -> ExtractReport:
         if symlinks not in ("store", "skip"):
             raise ValueError("symlinks must be 'store' or 'skip'")
         if strip_components < 0:
@@ -1790,12 +1873,20 @@ class ArchiveEngine:
         with self._operation():
             fmt = detect_format(path)
             backend = self._read_backend(path, fmt)
+            selected_members = set(members) if isinstance(members, (list, tuple, set, frozenset)) else members
+            budget = _ExtractionBudget(limits)
+            if isinstance(backend, StreamBackend):
+                entries = [ArchiveEntry(backend._name(path), compressed_size=path.stat().st_size,
+                                        size_known=False)]
+            else:
+                entries = backend.list_entries(path, password=password)
+            budget.preflight([entry for entry in entries if _selected(entry.name, selected_members)])
             dest = Path(destination)
             dest.mkdir(parents=True, exist_ok=True)
             report = ExtractReport(archive=path, destination=dest)
             ctx = _ExtractContext(
                 dest_real=Path(os.path.realpath(dest)),
-                members=set(members) if isinstance(members, (list, tuple, set, frozenset)) else members,
+                members=selected_members, budget=budget,
                 overwrite=overwrite, preserve_metadata=preserve_metadata,
                 symlinks=symlinks, strip=strip_components, report=report, progress=progress)
             start = time.monotonic()
