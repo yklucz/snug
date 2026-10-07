@@ -18,7 +18,7 @@ from typing import Any, Iterable, NoReturn, cast
 from snug_core import (
     ArchiveEntry, ArchiveError, ArchiveFormat, ArchiveInspection, CHUNK_SIZE, CreateReport,
     ProgressSink, SafeOutputFile, UnsafeArchiveError, _ExtractContext,
-    _clean_parts, _extract_entry, _prepare_target, _resolve_member, _test_chunks,
+    _abort_outputs, _clean_parts, _extract_entry, _prepare_target, _resolve_member, _test_chunks,
     _validate_structure,
     _selected, _detect_by_magic,
 )
@@ -530,12 +530,12 @@ class _SevenZipWriters:
         product.close()
 
     def close(self, abort: bool = False):
+        if abort:
+            _abort_outputs(self.ctx.pending_outputs)
+            return
         for entry, target, product in self.products.values():
             if isinstance(product, _DiskWriter):
-                if abort:
-                    product.abort()
-                else:
-                    product.close()
+                product.close()
 
 
 class _IntegrityWriter:

@@ -1176,6 +1176,30 @@ class SafeOutputFile:
                 self.temporary.unlink(missing_ok=True)
 
 
+def _abort_outputs(outputs: Iterable[SafeOutputFile]) -> None:
+    """Attempt every cleanup, retaining an in-flight decoding/interruption error."""
+    primary = sys.exc_info()[1]
+    failure: tuple[str, BaseException] | None = None
+    for output in outputs:
+        try:
+            output.abort()
+        except BaseException as exc:
+            if failure is None:
+                failure = (output.entry.name, exc)
+    if failure is None:
+        return
+    name, error = failure
+    message = f"cannot clean extraction staging for {name!r}: {error}"
+    if primary is not None:
+        add_note = getattr(primary, "add_note", None)
+        if add_note is not None:
+            add_note(message)
+    elif isinstance(error, (KeyboardInterrupt, SystemExit)):
+        raise error
+    else:
+        raise ArchiveError(message) from error
+
+
 def _extract_entry(ctx: _ExtractContext, entry: ArchiveEntry, chunks=None,
                    hardlink: str | None = None) -> None:
     """Shared checked extraction for backends yielding bounded byte chunks."""
@@ -2083,8 +2107,7 @@ class ArchiveEngine:
                 for entry, target, hardlink in ctx.deferred_hardlinks:
                     _commit_hardlink(ctx, entry, target, hardlink)
             finally:
-                for output in ctx.pending_outputs:
-                    output.abort()
+                _abort_outputs(ctx.pending_outputs)
             for directory, mode, mtime in sorted(ctx.deferred_dirs,
                                                   key=lambda item: len(item[0].parts), reverse=True):
                 _check_inside(ctx.dest_real, directory)
