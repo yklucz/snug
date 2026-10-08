@@ -10,16 +10,19 @@ from __future__ import annotations
 import argparse
 import codecs
 import getpass
+import io
 import os
 import queue
+import re
 import shutil
 import sys
 import tarfile
 import threading
 import time
+import unicodedata
 import zipfile
 from collections import deque
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Protocol, Sequence, TypeVar
@@ -88,19 +91,39 @@ def _run_screen(initial: Screen) -> None:
     ``Screen`` to transition, or ``_EXIT`` to terminate the loop.
     """
     screen: Screen = initial
+    drawn_size: tuple[int, int] | None = None
+    redraw = True
     with _raw_mode():
         while True:
             cols, rows = _term_size()
-            _draw_lines(screen.draw(cols, rows), footer=screen.footer())
-            key = _read_key()
+            size = (cols, rows)
+            small = _size_mode(cols, rows) == "small"
+            if redraw or size != drawn_size:
+                if small:
+                    _draw_lines(_too_small_lines(), size=size)
+                else:
+                    _draw_lines(screen.draw(cols, rows), footer=screen.footer(), size=size)
+                drawn_size = size
+                redraw = False
+            key = _read_key_timeout(0.1)
+            if key is None:
+                continue
+            # A resize may arrive during the input poll; gate the key against
+            # the current size before a handler can start an operation.
+            if _size_mode(*_term_size()) == "small" and key != "esc":
+                continue
             nxt = screen.handle(key)
             if nxt is _EXIT:
                 return
             if nxt is not None and not isinstance(nxt, _ExitMarker):
                 screen = nxt
+            redraw = True
 
 
-def _cursor_at(row: int, col: int = 1) -> str:
+def _cursor_at(row: int, col: int = 1, *, size: tuple[int, int] | None = None) -> str:
+    cols, rows = size if size is not None else _term_size()
+    row = max(1, min(row, max(1, rows)))
+    col = max(1, min(col, max(1, cols)))
     return f"{_ESC}{row};{col}H"
 
 
@@ -122,6 +145,7 @@ def _enable_ansi_windows() -> None:
 
 def _clear_screen() -> None:
     """Home the cursor and wipe everything below."""
+    _TUI_LAST_LINES.clear()
     sys.stdout.write(_HOME + _CLEAR_BELOW)
     sys.stdout.flush()
 
@@ -313,35 +337,99 @@ def _decode_simple_char(b: bytes) -> str:
 
 # -- full-screen renderer --------------------------------------------------- #
 
+_TUI_SGR = re.compile(r"\x1b\[[0-9;]*m")
+_TUI_LAST_LINES: list[str] = []
+
+
+def _tui_char_width(char: str) -> int:
+    if unicodedata.combining(char) or unicodedata.category(char) in (
+        "Mn", "Me", "Cf", "Cc", "Cs",
+    ):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def _tui_cell_width(text: str) -> int:
+    """Terminal cells for TUI text; leave the shared CLI helpers unchanged."""
+    return sum(_tui_char_width(char) for char in _TUI_SGR.sub("", text))
+
+
+def _tui_truncate(text: str, width: int) -> str:
+    """Keep whole characters and SGR styling within a terminal-cell budget."""
+    if width <= 0:
+        return ""
+    if _tui_cell_width(text) <= width:
+        return text
+    budget = width - 1  # reserve one cell for the ellipsis
+    cells = 0
+    pos = 0
+    kept: list[str] = []
+    styled = False
+    while pos < len(text):
+        sgr = _TUI_SGR.match(text, pos)
+        if sgr is not None:
+            kept.append(sgr.group())
+            styled = True
+            pos = sgr.end()
+            continue
+        char = text[pos]
+        char_width = _tui_char_width(char)
+        if cells + char_width > budget:
+            break
+        kept.append(char)
+        cells += char_width
+        pos += 1
+    return "".join(kept) + "…" + (_C.RESET if styled else "")
+
+
+def _size_mode(cols: int, rows: int) -> str:
+    if cols < 40 or rows < 10:
+        return "small"
+    return "full" if cols >= 80 and rows >= 24 else "compact"
+
+
+def _too_small_lines() -> list[str]:
+    return ["Terminal too small", "Minimum: 40x10", "Esc: current back action · Ctrl+C: interrupt"]
+
+
 def _term_size() -> tuple[int, int]:
     size = shutil.get_terminal_size((100, 30))
-    return size.columns, size.lines
+    return max(1, size.columns), max(1, size.lines)
 
 
-def _draw_lines(lines: list[str], footer: list[str] | None = None) -> None:
-    """Home the cursor, wipe the screen, draw *lines*, then pin *footer* to
-    the bottom rows."""
-    cols, rows = _term_size()
+def _draw_lines(lines: list[str], footer: list[str] | None = None, *,
+                size: tuple[int, int] | None = None) -> None:
+    """Budget body and footer together, without bottom-row newlines."""
+    cols, rows = size if size is not None else _term_size()
+    cols, rows = max(1, cols), max(1, rows)
+    size = (cols, rows)
+    footer = (footer or [])[-rows:]
+    body = lines[:rows - len(footer)]
+    _TUI_LAST_LINES[:] = lines
     out = sys.stdout
     out.write(_HOME + _CLEAR_BELOW)
-    for line in lines:
-        out.write(_C.RESET + _truncate(line, cols - 1) + _CLEAR_LINE + _NL)
-    if footer:
-        start_row = rows - len(footer) + 1
-        for i, line in enumerate(footer):
-            out.write(_cursor_at(start_row + i) + _C.RESET + _CLEAR_LINE
-                      + _truncate(line, cols - 1))
+    for row, line in enumerate(body, 1):
+        out.write(_cursor_at(row, size=size) + _C.RESET
+                  + _tui_truncate(line, max(1, cols - 1)) + _CLEAR_LINE)
+    start_row = rows - len(footer) + 1
+    for i, line in enumerate(footer):
+        out.write(_cursor_at(start_row + i, size=size) + _C.RESET + _CLEAR_LINE
+                  + _tui_truncate(line, max(1, cols - 1)))
     out.flush()
 
 
 def _draw_footer(lines: list[str]) -> None:
     """Redraw just the footer rows at the bottom of the screen."""
     cols, rows = _term_size()
+    if _size_mode(cols, rows) == "small":
+        _draw_lines(_too_small_lines(), size=(cols, rows))
+        return
+    lines = lines[-rows:]
     out = sys.stdout
     start_row = rows - len(lines) + 1
     for i, line in enumerate(lines):
-        out.write(_cursor_at(start_row + i) + _C.RESET + _CLEAR_LINE
-                  + _truncate(line, cols - 1))
+        out.write(_cursor_at(start_row + i, size=(cols, rows)) + _C.RESET + _CLEAR_LINE
+                  + _tui_truncate(line, max(1, cols - 1)))
     out.flush()
 
 
@@ -354,6 +442,11 @@ def _match_option_key(key: str, options: list[tuple[str, str]]) -> bool:
 class _MenuScreen:
     """Full-screen option menu."""
 
+    _PINNED_ACTIONS = frozenset((
+        "Back", "Quit", "Create archive", "Extract archive", "Test archive",
+        "Use this selection", "Use these limits",
+    ))
+
     def __init__(self, title: str, subtitle: str | None,
                  options: list[tuple[str, str]]) -> None:
         self.title = title
@@ -361,8 +454,21 @@ class _MenuScreen:
         self.options = options
         self.selected = 0
         self.result: str | None = None
+        self._mode = "full"
 
     def draw(self, cols: int, rows: int) -> list[str]:
+        self._mode = _size_mode(cols, rows)
+        if self._mode == "small":
+            return _too_small_lines()
+        if self._mode == "compact":
+            title = self.title
+            if self.subtitle:
+                title += " · " + _safe(self.subtitle)
+            lines = [_paint(title, _C.BOLD)]
+            room = rows - len(lines) - len(self.footer())
+            indices = self._compact_indices(room)
+            lines.extend(self._option_line(i) for i in indices)
+            return lines
         width = min(cols - 6, 60)
         bar = "═" * width
         header = f"Snug — archive creation & extraction  v{__version__}".center(width)
@@ -375,32 +481,41 @@ class _MenuScreen:
             "",
         ]
         if self.subtitle:
-            lines.append("  " + _paint(_truncate(_safe(self.subtitle), cols - 4), _C.DIM))
+            lines.append("  " + _paint(_tui_truncate(_safe(self.subtitle), cols - 4), _C.DIM))
             lines.append("")
         lines.append("  " + _paint(self.title, _C.BOLD))
         lines.append("")
 
-        room = max(1, rows - len(lines) - len(self.footer()))
+        room = rows - len(lines) - len(self.footer())
         start, end = _visible_range(len(self.options), self.selected, room)
-        for i in range(start, end):
-            key, label = self.options[i]
-            if i == self.selected:
-                lines.append(
-                    "  " + _paint("❯", _C.BOLD_GREEN)
-                    + _paint(f" {key})  {label}", _C.BOLD_WHITE)
-                )
-            else:
-                lines.append("  " + f"  {key})  {label}")
+        lines.extend(self._option_line(i) for i in range(start, end))
         return lines
 
+    def _compact_indices(self, room: int) -> list[int]:
+        if len(self.options) <= room:
+            return list(range(len(self.options)))
+        pinned = [i for i, (_, label) in enumerate(self.options)
+                  if label in self._PINNED_ACTIONS]
+        scrolling = [i for i in range(len(self.options)) if i not in pinned]
+        cursor = scrolling.index(self.selected) if self.selected in scrolling else 0
+        start, end = _visible_range(len(scrolling), cursor, room - len(pinned))
+        return scrolling[start:end] + pinned
+
+    def _option_line(self, i: int) -> str:
+        key, label = self.options[i]
+        if i == self.selected:
+            return ("  " + _paint("❯", _C.BOLD_GREEN)
+                    + _paint(f" {key})  {label}", _C.BOLD_WHITE))
+        return "  " + f"  {key})  {label}"
+
     def footer(self) -> list[str]:
-        keys = "/".join(key for key, _ in self.options if len(key) == 1)
+        if self._mode == "small":
+            return []
+        if self._mode == "compact":
+            return [_paint("↑↓ Move · Enter Select · Esc/q Leave", _C.DIM)]
         return [
-            "",
-            "  " + _paint(
-                f"↑/↓ move  •  enter select  •  {keys} jump  •  q quit",
-                _C.DIM,
-            ),
+            "  " + _paint("↑/↓ move · Enter select · shortcut activates", _C.DIM),
+            "  " + _paint("Esc / q leave this menu", _C.DIM),
         ]
 
     def handle(self, key: str) -> "Screen | _ExitMarker | None":
@@ -449,23 +564,52 @@ def _select_menu(title: str, options: list[tuple[str, str]],
     return screen.result
 
 
+class _PauseScreen:
+    """Bounded result/error output with the existing Enter-only pause."""
+
+    def __init__(self, lines: list[str]) -> None:
+        self.lines = lines
+        self._mode = "full"
+
+    def draw(self, cols: int, rows: int) -> list[str]:
+        self._mode = _size_mode(cols, rows)
+        if self._mode == "small":
+            return _too_small_lines()
+        room = rows - len(self.footer())
+        return self.lines[:room]
+
+    def footer(self) -> list[str]:
+        if self._mode == "small":
+            return []
+        hint = _paint("Press Enter to continue…", _C.DIM)
+        return ["", "  " + hint] if self._mode == "full" else [hint]
+
+    def handle(self, key: str) -> _ExitMarker | None:
+        return _EXIT if key == "enter" else None
+
+
+@contextmanager
+def _menu_result_output():
+    """Collect only TUI result printing; shared CLI printers stay unchanged."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        yield
+        return
+    output = io.StringIO()
+    with redirect_stdout(output), redirect_stderr(output):
+        yield
+    _TUI_LAST_LINES[:] = output.getvalue().splitlines()
+
+
 def _wait_for_enter() -> None:
-    """Show a hint at the bottom of the screen and wait for Enter."""
+    """Redraw a bounded result, including on idle resize, until Enter."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return
-    _draw_footer(["", "  " + _paint("Press Enter to continue…", _C.DIM)])
-    with _raw_mode():
-        while True:
-            if _read_key() == "enter":
-                return
+    _run_screen(_PauseScreen(list(_TUI_LAST_LINES)))
 
 
 # =========================================================================== #
 #  File picker (arrow-key source selection)
 # =========================================================================== #
-
-_PICKER_MIN_ROWS = 5
-
 
 def _is_enterable(path: Path) -> bool:
     """True for directories we can navigate into (not symlinks to dirs)."""
@@ -504,9 +648,9 @@ def _entry_name(entry: Path) -> str:
     return _safe(entry.name)
 
 
-def _picker_help_line() -> str:
-    return ("↑/↓ move  •  → enter dir  •  ← up  •  space mark  •  "
-            "enter confirm  •  / filter  •  q cancel")
+def _picker_help_line(filter_mode: bool = False) -> str:
+    space = "text" if filter_mode else "mark"
+    return f"↑/↓ move · → directory · ← up · Space {space} · Enter confirm"
 
 
 # -- breadcrumb rendering --------------------------------------------------- #
@@ -524,7 +668,7 @@ def _origin_index(current: Path, origin: Path) -> int | None:
 
 def _labels_width(labels: list[str]) -> int:
     """Visible width of the labels joined by the separator ' › '."""
-    return sum(len(s) for s in labels) + 3 * max(0, len(labels) - 1)
+    return sum(_tui_cell_width(s) for s in labels) + 3 * max(0, len(labels) - 1)
 
 
 def _breadcrumb_indices(current: Path, budget: int) -> list[int | None]:
@@ -585,6 +729,7 @@ class _PickerScreen:
         self.filter_mode = False
         self.result: list[Path] | None = None
         self._row_count = 12
+        self._mode = "full"
 
     # -- helpers -------------------------------------------------------- #
 
@@ -600,17 +745,20 @@ class _PickerScreen:
             text = f"  Marked ({len(self.marked)}): " + ", ".join(names)
             return _paint(text, _C.BOLD_YELLOW)
         return _paint(
-            "  Marked: (none — Enter uses the highlighted item)", _C.DIM
+            "  Marked (0): Enter uses the highlighted item", _C.DIM
         )
 
     # -- Screen protocol ------------------------------------------------ #
 
     def draw(self, cols: int, rows: int) -> list[str]:
-        self._row_count = max(_PICKER_MIN_ROWS, rows - 8)
+        self._mode = _size_mode(cols, rows)
+        if self._mode == "small":
+            return _too_small_lines()
+        lines = self._header_lines(cols)
+        self._row_count = rows - len(lines) - len(self.footer())
         visible = self._visible()
         self._clamp_cursor(len(visible))
 
-        lines = self._header_lines(cols)
         if visible:
             lines.extend(self._render_entries(visible))
         else:
@@ -621,6 +769,10 @@ class _PickerScreen:
         self.cursor = max(0, min(self.cursor, total - 1)) if total else 0
 
     def _header_lines(self, cols: int) -> list[str]:
+        if self._mode == "compact":
+            location = f"Filter: {self.filter}" if self.filter else _safe(self.current)
+            return [_paint(f"Sources · Marked ({len(self.marked)}) · ", _C.BOLD)
+                    + location]
         lines = [
             "",
             "  " + _paint("Select sources to archive", _C.BOLD),
@@ -658,8 +810,15 @@ class _PickerScreen:
         return f"  {cursor_marker} {mark_marker} {name}"
 
     def footer(self) -> list[str]:
+        if self._mode == "small":
+            return []
+        if self._mode == "compact":
+            help_line = ("Enter Confirm · Esc Clear/Cancel" if self.filter or self.filter_mode
+                         else "Enter Confirm · Space Mark · Esc Cancel")
+            return [_paint(help_line, _C.DIM)]
         return [
-            "  " + _paint(_picker_help_line(), _C.DIM),
+            "  " + _paint(_picker_help_line(self.filter_mode), _C.DIM),
+            "  " + _paint("Type or / to filter · Esc clear filter / cancel · q cancel when unfiltered", _C.DIM),
             self._marked_line(),
         ]
 
@@ -827,10 +986,10 @@ def _draw_spinner_line(frame: str, count: int, total_bytes: int,
         + f"{count} items, {human_bytes(total_bytes)}"
     )
     if last_name:
-        line += "  " + _paint(_truncate(_safe(last_name), 40), _C.DIM)
+        line += "  " + _paint(_tui_truncate(_safe(last_name), 40), _C.DIM)
     cols = shutil.get_terminal_size((120, 24)).columns
-    if _visible_len(line) > cols - 1:
-        line = _truncate(line, cols - 1)
+    if _tui_cell_width(line) > cols - 1:
+        line = _tui_truncate(line, cols - 1)
     sys.stdout.write("\r" + line + _CLEAR_LINE)
     sys.stdout.flush()
 
@@ -1127,7 +1286,8 @@ def _menu_password_supported(archive: Path) -> bool:
 
 def _menu_unavailable(message: str) -> None:
     _clear_screen()
-    print(f"  {message}")
+    with _menu_result_output():
+        print(f"  {message}")
     _wait_for_enter()
 
 
@@ -1247,7 +1407,8 @@ def _menu_confirm_overwrite(archive: Path) -> bool:
     answer = _prompt(f"{archive} exists. Overwrite? (y/N)", "n").lower()
     if answer in ("y", "yes"):
         return True
-    print("  Cancelled; existing archive was not changed.")
+    with _menu_result_output():
+        print("  Cancelled; existing archive was not changed.")
     return False
 
 
@@ -1261,7 +1422,8 @@ def _menu_create(engine: ArchiveEngine) -> None:
     sources = _select_sources_arrow(cwd)
     if not sources:
         _clear_screen()
-        print("\n  No sources selected; cancelled.")
+        with _menu_result_output():
+            print("\n  No sources selected; cancelled.")
         return
     supported = engine.writable_formats()
     if not supported:
@@ -1283,11 +1445,13 @@ def _menu_create(engine: ArchiveEngine) -> None:
         )
     except KeyboardInterrupt:
         _clear_screen()
-        print(_CANCELLED_MESSAGE)
+        with _menu_result_output():
+            print(_CANCELLED_MESSAGE)
         return
     if precollected is None:
         _clear_screen()
-        print("\n  Enumeration cancelled.")
+        with _menu_result_output():
+            print("\n  Enumeration cancelled.")
         return
 
     print()
@@ -1304,9 +1468,10 @@ def _menu_create(engine: ArchiveEngine) -> None:
             progress=display,
             precollected=precollected,
         )
-    print()
-    _print_create_summary(report)
-    _print_menu_skipped(report.skipped)
+    with _menu_result_output():
+        print()
+        _print_create_summary(report)
+        _print_menu_skipped(report.skipped)
 
 
 def _menu_selected_members(names: list[str], selected: set[str]) -> list[str] | None:
@@ -1462,7 +1627,8 @@ def _configure_extract(engine: ArchiveEngine, options: _ExtractOptions) -> bool:
             return False
         if choice == "r":
             if options.members == []:
-                print("  No members selected; cancelled.")
+                with _menu_result_output():
+                    print("  No members selected; cancelled.")
                 return False
             return True
         handlers[choice]()
@@ -1472,7 +1638,8 @@ def _menu_extract(engine: ArchiveEngine) -> None:
     archive = _select_archive()
     if archive is None:
         _clear_screen()
-        print(_CANCELLED_MESSAGE)
+        with _menu_result_output():
+            print(_CANCELLED_MESSAGE)
         return
 
     options = _ExtractOptions(archive, _menu_password_supported(archive))
@@ -1487,9 +1654,10 @@ def _menu_extract(engine: ArchiveEngine) -> None:
                                 preserve_metadata=options.metadata, symlinks=options.symlinks,
                                 strip_components=options.strip_components, password=options.password,
                                 limits=options.limits, progress=display)
-    print()
-    _print_extract_summary(report)
-    _print_menu_skipped(report.skipped)
+    with _menu_result_output():
+        print()
+        _print_extract_summary(report)
+        _print_menu_skipped(report.skipped)
 
 
 def _menu_test(engine: ArchiveEngine) -> None:
@@ -1513,43 +1681,48 @@ def _menu_test(engine: ArchiveEngine) -> None:
     _clear_screen()
     with _menu_password_errors(password):
         report = engine.test(archive, password=password, progress=ProgressDisplay("test"))
-    print()
-    _print_test_summary(report)
+    with _menu_result_output():
+        print()
+        _print_test_summary(report)
 
 
 def _menu_list(engine: ArchiveEngine) -> None:
     archive = _select_archive()
     if archive is None:
         _clear_screen()
-        print(_CANCELLED_MESSAGE)
+        with _menu_result_output():
+            print(_CANCELLED_MESSAGE)
         return
 
     _clear_screen()
     entries = engine.list_entries(archive)
-    print(f"\n  {_safe(archive.name)} — {len(entries)} entries\n")
-    for entry in entries:
-        _print_entry_verbose(entry)
-    print()
+    with _menu_result_output():
+        print(f"\n  {_safe(archive.name)} — {len(entries)} entries\n")
+        for entry in entries:
+            _print_entry_verbose(entry)
+        print()
 
 
 def _menu_info(engine: ArchiveEngine) -> None:
     archive = _select_archive()
     if archive is None:
         _clear_screen()
-        print(_CANCELLED_MESSAGE)
+        with _menu_result_output():
+            print(_CANCELLED_MESSAGE)
         return
 
     _clear_screen()
     data = engine.info(archive)
     width = max(len(k) for k in data)
-    print()
-    for key, value in data.items():
-        if key in ("archive_size", "uncompressed_size"):
-            value = human_bytes(value)
-        if isinstance(value, bool):
-            value = "yes" if value else "no"
-        print(f"  {key:<{width}} : {_safe(value)}")
-    print()
+    with _menu_result_output():
+        print()
+        for key, value in data.items():
+            if key in ("archive_size", "uncompressed_size"):
+                value = human_bytes(value)
+            if isinstance(value, bool):
+                value = "yes" if value else "no"
+            print(f"  {key:<{width}} : {_safe(value)}")
+        print()
 
 
 # -- top-level loop --------------------------------------------------------- #
@@ -1581,14 +1754,17 @@ def _run_menu_handler(engine: ArchiveEngine,
         return 0
     except UnsafeArchiveError as exc:
         _clear_screen()
-        print(f"\n  error: unsafe archive: {_safe(exc)}\n")
+        with _menu_result_output():
+            print(f"\n  error: unsafe archive: {_safe(exc)}\n")
     except ArchiveError as exc:
         _clear_screen()
-        print(f"\n  error: {_safe(exc)}\n")
+        with _menu_result_output():
+            print(f"\n  error: {_safe(exc)}\n")
     except (OSError, zipfile.BadZipFile, tarfile.TarError, EOFError,
             ValueError) as exc:
         _clear_screen()
-        print(f"\n  error: {_safe(exc)}\n")
+        with _menu_result_output():
+            print(f"\n  error: {_safe(exc)}\n")
 
     try:
         _wait_for_enter()
