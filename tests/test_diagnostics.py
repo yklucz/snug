@@ -141,6 +141,9 @@ def managed_files(root, monkeypatch, *, windows=False):
         (root / "runtime.json").write_text(json.dumps({"kind": "windows", "python": "python.exe", "library": "native/archive.dll"}))
     else:
         (root / ".snug-install.json").write_text(json.dumps({"schema": 1, "kind": "homebrew", "branch": "main"}))
+        # Simulate a Homebrew-managed macOS installation even on Windows CI.
+        # The separate windows=True case covers native Windows runtime ownership.
+        monkeypatch.setattr(snug.sys, "platform", "darwin")
         monkeypatch.setenv("SNUG_MANAGED_ROOT", str(root))
 
 

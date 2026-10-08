@@ -388,7 +388,7 @@ def managed_install(tmp_path, monkeypatch):
         (root / name / "keep.bin").write_bytes(b"current runtime")
     (root / "runtime.json").write_text('{"kind":"homebrew"}')
     launcher = tmp_path / "snug-launcher"
-    launcher.write_text(f"stable launcher referencing {root}")
+    launcher.write_text(f"stable launcher referencing {root}", encoding="utf-8")
     monkeypatch.setattr(update, "APP", root)
     monkeypatch.setenv("SNUG_MANAGED_ROOT", str(root))
     monkeypatch.setattr(update.sys, "platform", "darwin")
