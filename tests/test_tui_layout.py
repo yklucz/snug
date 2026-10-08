@@ -456,7 +456,7 @@ def test_tty_results_and_errors_reach_bounded_pause(monkeypatch, tmp_path, unsaf
     monkeypatch.setattr(snug.sys, "stdin", SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr(snug, "_raw_mode", nullcontext)
     monkeypatch.setattr(snug, "_term_size", lambda: size)
-    keys = iter([None, "esc", "enter"])
+    keys = iter([None, "esc"])
     monkeypatch.setattr(snug, "_read_key_timeout", lambda timeout: next(keys))
     monkeypatch.setattr(snug, "_select_archive", lambda: tmp_path / "archive.zip")
     entries = [snug.ArchiveEntry(f"item-{i:02d}-界🙂e\u0301.txt", size=100)
@@ -467,9 +467,10 @@ def test_tty_results_and_errors_reach_bounded_pause(monkeypatch, tmp_path, unsaf
         raise snug.UnsafeArchiveError("path traversal: " + "界🙂" * 100)
 
     assert snug._run_menu_handler(engine, reject if unsafe else snug._menu_list) is None
+    assert list(keys) == []
     rendered = _terminal_rows(output.getvalue(), size)
     visible = "\n".join(rendered.values())
-    assert "Enter" in visible
+    assert "Enter" in visible and "Esc" in visible
     if unsafe:
         assert "error: unsafe archive" in visible
     else:

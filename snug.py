@@ -567,7 +567,7 @@ def _select_menu(title: str, options: list[tuple[str, str]],
 
 
 class _PauseScreen:
-    """Bounded result/error output with the existing Enter-only pause."""
+    """Bounded result/error output dismissed with Enter or Escape."""
 
     def __init__(self, lines: list[str]) -> None:
         self.lines = lines
@@ -583,11 +583,11 @@ class _PauseScreen:
     def footer(self) -> list[str]:
         if self._mode == "small":
             return []
-        hint = _paint("Press Enter to continue…", _C.DIM)
+        hint = _paint("Enter / Esc to continue…", _C.DIM)
         return ["", "  " + hint] if self._mode == "full" else [hint]
 
     def handle(self, key: str) -> _ExitMarker | None:
-        return _EXIT if key == "enter" else None
+        return _EXIT if key in ("enter", "esc") else None
 
 
 @contextmanager
@@ -603,7 +603,7 @@ def _menu_result_output():
 
 
 def _wait_for_enter() -> None:
-    """Redraw a bounded result, including on idle resize, until Enter."""
+    """Redraw a bounded result, including on idle resize, until Enter or Escape."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return
     _run_screen(_PauseScreen(list(_TUI_LAST_LINES)))
@@ -1645,7 +1645,128 @@ def _menu_limit_value(current: _LimitNumber | None,
             print(f"  {_safe(exc)}")
 
 
+class _LimitsScreen(_MenuScreen):
+    """Keep limit edits local until Apply; Escape discards a field or the screen."""
+
+    _FIELDS = (
+        ("e", "Selected entries", "max_entries"),
+        ("s", "Total decoded bytes", "max_total_size"),
+        ("f", "Decoded bytes per member", "max_file_size"),
+        ("r", "Compression ratio", "max_ratio"),
+    )
+
+    def __init__(self, current: ExtractionLimits) -> None:
+        self._original = current
+        self.values = {field: getattr(current, field) for _, _, field in self._FIELDS}
+        self.limits_result = current
+        self.editing: str | None = None
+        self.buffer = ""
+        self._notice: str | None = None
+        super().__init__("Extraction limits", "K/KB decimal · KiB binary · none clears", [])
+        self._refresh_options()
+
+    def _refresh_options(self) -> None:
+        self.options = [(key, f"{label}: {_menu_limit_label(self.values[field])}")
+                        for key, label, field in self._FIELDS]
+        self.options.append(("b", "Use these limits"))
+
+    def draw(self, cols: int, rows: int) -> list[str]:
+        if self.editing is None:
+            return super().draw(cols, rows)
+        self._mode = _size_mode(cols, rows)
+        if self._mode == "small":
+            return _too_small_lines()
+        _, label, field = next(item for item in self._FIELDS if item[0] == self.editing)
+        current = _menu_limit_label(self.values[field])
+        lines = [
+            _paint(label, _C.BOLD),
+            f"Current: {current}",
+            f"Value: {_safe(self.buffer)}" if self.buffer else f"Value: [{current}]",
+        ]
+        if self._notice:
+            lines.append(_paint("error: " + self._notice, _C.BOLD_YELLOW))
+        lines.append("Empty keeps value · none clears")
+        if self.editing in ("s", "f"):
+            lines.append("K/KB decimal · KiB binary")
+        return lines[:rows - len(self.footer())]
+
+    def footer(self) -> list[str]:
+        if self._mode == "small":
+            return []
+        if self.editing is not None:
+            hint = "Enter Save · Esc Discard field"
+            return [_paint(hint, _C.DIM)] if self._mode == "compact" else [
+                "  " + _paint(hint, _C.DIM),
+                "  " + _paint("Apply on the limits screen keeps edits", _C.DIM),
+            ]
+        if self._mode == "compact":
+            return [_paint("Tab/b Apply · Esc Discards edits", _C.DIM)]
+        return [
+            "  " + _paint("↑↓ move · Enter activates · e/s/f/r edit", _C.DIM),
+            "  " + _paint("Tab / b Apply · Esc / q discard edits", _C.DIM),
+        ]
+
+    def _handle_field(self, key: str) -> None:
+        if key == "esc":
+            self.editing = None
+            self.buffer = ""
+            self._notice = None
+        elif key == "enter":
+            field = next(field for shortcut, _, field in self._FIELDS if shortcut == self.editing)
+            raw = self.buffer.strip() or _menu_limit_label(self.values[field])
+            parser = {"e": _parse_count, "s": parse_size, "f": parse_size, "r": _parse_ratio}[self.editing]
+            try:
+                value = None if raw.lower() == "none" else parser(raw)
+                candidate = dict(self.values)
+                candidate[field] = value
+                ExtractionLimits(**candidate)
+            except (ValueError, argparse.ArgumentTypeError) as exc:
+                self._notice = _safe(exc)
+                return
+            self.values = candidate
+            self.editing = None
+            self.buffer = ""
+            self._notice = None
+            self._refresh_options()
+        elif key == "backspace":
+            self.buffer = self.buffer[:-1]
+        elif key == "space":
+            self.buffer += " "
+        elif len(key) == 1 and key.isprintable():
+            self.buffer += key
+
+    def handle(self, key: str) -> "Screen | _ExitMarker | None":
+        if self.editing is not None:
+            self._handle_field(key)
+            return None
+        if key in ("esc", "quit", "q", "Q"):
+            self.values = {field: getattr(self._original, field) for _, _, field in self._FIELDS}
+            self.limits_result = self._original
+            self._refresh_options()
+            return _EXIT
+        if key in ("up", "down"):
+            return super().handle(key)
+        choice = self.options[self.selected][0] if key == "enter" else key
+        if choice in ("b", "confirm"):
+            self.limits_result = ExtractionLimits(**self.values)
+            return _EXIT
+        if any(shortcut == choice for shortcut, _, _ in self._FIELDS):
+            self.editing = choice
+            self.buffer = ""
+            self._notice = None
+        return None
+
+
 def _menu_limits(current: ExtractionLimits) -> ExtractionLimits:
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        screen = _LimitsScreen(current)
+        try:
+            _run_screen(screen)
+        except KeyboardInterrupt as exc:
+            if screen.editing is not None:
+                raise _QuitInteractive() from exc
+            raise
+        return screen.limits_result
     entries, total, per_file, ratio = (current.max_entries, current.max_total_size,
                                       current.max_file_size, current.max_ratio)
     while True:
@@ -1656,7 +1777,9 @@ def _menu_limits(current: ExtractionLimits) -> ExtractionLimits:
             ("r", f"Compression ratio: {_menu_limit_label(ratio)}"),
             ("b", "Use these limits"),
         ], subtitle="No limits by default. K/KB are decimal; KiB is binary. Enter none to clear.")
-        if choice is None or choice == "b":
+        if choice is None:
+            return current
+        if choice == "b":
             return ExtractionLimits(entries, total, per_file, ratio)
         if choice == "e":
             entries = _menu_limit_value(entries, _parse_count)
