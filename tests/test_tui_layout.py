@@ -303,11 +303,11 @@ def test_compact_picker_footer_describes_filter_space_and_escape(monkeypatch, tm
     screen.draw(40, 10)
     footer = "\n".join(screen.footer())
     assert "Esc Clear/Cancel" in footer
-    assert "Space Mark" not in footer
-    assert "Enter Confirm" in footer
+    assert "Space Mark" in footer
+    assert "Tab Confirm" in footer
     assert _cells(footer) <= 39
     screen.draw(80, 24)
-    assert "Space text" in "\n".join(screen.footer())
+    assert "Space mark" in "\n".join(screen.footer())
     assert screen.marked == {source}
 
 

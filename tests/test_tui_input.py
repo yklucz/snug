@@ -115,7 +115,7 @@ def test_fragmented_arrows_inside_timeout_still_decode(unix_input, prefix, final
         (b"\x7f", "backspace"),
         (b"\x08", "backspace"),
         (b"\x00", "other"),
-        (b"\t", "other"),
+        (b"\t", "confirm"),
         (b"\x1f", "other"),
         (b"\xc2\x80", "other"),
         (b"\xc2\x85", "other"),
@@ -266,7 +266,9 @@ def test_picker_filter_uses_whole_unicode_events_and_backspace_preserves_paths(u
 
     assert screen.handle(snug._read_key_unix()) is None
     assert screen.filter == "Vi"
-    assert set(screen._visible()) == {source_path, another}
+    # NFC composes i + acute into í; the unaccented query no longer matches it.
+    expected = {another} if character == "\u0301" else {source_path, another}
+    assert set(screen._visible()) == expected
     assert screen.marked == {source_path}
     assert screen.handle(snug._read_key_unix()) is snug._EXIT
     assert screen.result == [source_path]

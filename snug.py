@@ -190,7 +190,7 @@ def _raw_mode():
 
 def _read_key() -> str:
     """Return one of: up, down, left, right, enter, esc, space, backspace,
-    quit, or a single printable character."""
+    confirm (Unix Tab), quit, or a single printable character."""
     if os.name == "nt":
         return _read_key_windows()
     return _read_key_unix()
@@ -282,6 +282,8 @@ def _read_key_unix() -> str:
         raise KeyboardInterrupt
     if b == b"\x03":
         raise KeyboardInterrupt
+    if b == b"\t":
+        return "confirm"
     if b == b"\x1b":
         return _read_arrow_sequence(fd)
     if b[0] >= 0x80:
@@ -618,10 +620,7 @@ def _is_enterable(path: Path) -> bool:
 
 def _list_dir_entries(path: Path) -> list[Path]:
     """Return entries sorted: subdirectories first, then files and symlinks."""
-    try:
-        items = list(path.iterdir())
-    except OSError:
-        return []
+    items = list(path.iterdir())
     dirs = sorted((p for p in items if _is_enterable(p)),
                   key=lambda p: p.name.lower())
     rest = sorted((p for p in items if not _is_enterable(p)),
@@ -648,9 +647,8 @@ def _entry_name(entry: Path) -> str:
     return _safe(entry.name)
 
 
-def _picker_help_line(filter_mode: bool = False) -> str:
-    space = "text" if filter_mode else "mark"
-    return f"↑/↓ move · → directory · ← up · Space {space} · Enter confirm"
+def _picker_help_line() -> str:
+    return "Enter/→ open dir · Enter file confirms · Space mark · Tab confirm marks"
 
 
 # -- breadcrumb rendering --------------------------------------------------- #
@@ -722,7 +720,8 @@ class _PickerScreen:
     def __init__(self, origin: Path) -> None:
         self.origin = origin
         self.current = origin
-        self.entries = _list_dir_entries(origin)
+        self.entries: list[Path] = []
+        self._directories: set[Path] = set()
         self.cursor = 0
         self.marked: set[Path] = set()
         self.filter = ""
@@ -730,14 +729,31 @@ class _PickerScreen:
         self.result: list[Path] | None = None
         self._row_count = 12
         self._mode = "full"
+        self._read_error: str | None = None
+        self._notice: str | None = None
+        self._load_entries()
 
     # -- helpers -------------------------------------------------------- #
 
     def _visible(self) -> list[Path]:
         if not self.filter:
             return self.entries
-        needle = self.filter.lower()
-        return [p for p in self.entries if needle in p.name.lower()]
+        needle = unicodedata.normalize("NFC", self.filter).lower()
+        return [p for p in self.entries
+                if needle in unicodedata.normalize("NFC", p.name).lower()]
+
+    def _load_entries(self) -> None:
+        """Keep a failed directory read distinct from an empty directory."""
+        try:
+            self.entries = _list_dir_entries(self.current)
+            self._directories = {path for path in self.entries if _is_enterable(path)}
+        except OSError as exc:
+            self.entries = []
+            self._directories = set()
+            self._read_error = _safe(exc.strerror or str(exc))
+        else:
+            self._read_error = None
+        self._notice = None
 
     def _marked_line(self) -> str:
         if self.marked:
@@ -745,7 +761,7 @@ class _PickerScreen:
             text = f"  Marked ({len(self.marked)}): " + ", ".join(names)
             return _paint(text, _C.BOLD_YELLOW)
         return _paint(
-            "  Marked (0): Enter uses the highlighted item", _C.DIM
+            "  Marked (0): Space marks; Tab confirms marked sources", _C.DIM
         )
 
     # -- Screen protocol ------------------------------------------------ #
@@ -755,11 +771,15 @@ class _PickerScreen:
         if self._mode == "small":
             return _too_small_lines()
         lines = self._header_lines(cols)
+        if self._notice:
+            lines.append("  " + _paint(self._notice, _C.BOLD_YELLOW))
         self._row_count = rows - len(lines) - len(self.footer())
         visible = self._visible()
         self._clamp_cursor(len(visible))
 
-        if visible:
+        if self._read_error is not None:
+            lines.extend(self._render_read_error())
+        elif visible:
             lines.extend(self._render_entries(visible))
         else:
             lines.extend(self._render_empty())
@@ -771,7 +791,7 @@ class _PickerScreen:
     def _header_lines(self, cols: int) -> list[str]:
         if self._mode == "compact":
             location = f"Filter: {self.filter}" if self.filter else _safe(self.current)
-            return [_paint(f"Sources · Marked ({len(self.marked)}) · ", _C.BOLD)
+            return [_paint(f"Marked ({len(self.marked)}) · ↵ Open/OK · ", _C.BOLD)
                     + location]
         lines = [
             "",
@@ -788,6 +808,10 @@ class _PickerScreen:
     def _render_empty(self) -> list[str]:
         msg = "(no matches)" if self.entries else "(empty directory)"
         return ["  " + _paint(msg, _C.DIM)] + [""] * (self._row_count - 1)
+
+    def _render_read_error(self) -> list[str]:
+        return ["  " + _paint(f"Error: {self._read_error}", _C.BOLD_RED),
+                "  Enter Retry · ← Back"] + [""] * (self._row_count - 2)
 
     def _render_entries(self, visible: list[Path]) -> list[str]:
         start, end = _visible_range(len(visible), self.cursor, self._row_count)
@@ -813,20 +837,30 @@ class _PickerScreen:
         if self._mode == "small":
             return []
         if self._mode == "compact":
-            help_line = ("Enter Confirm · Esc Clear/Cancel" if self.filter or self.filter_mode
-                         else "Enter Confirm · Space Mark · Esc Cancel")
+            help_line = ("Space Mark Tab Confirm Esc Clear/Cancel" if self.filter or self.filter_mode
+                         else "Space Mark · Tab Confirm · Esc Cancel")
             return [_paint(help_line, _C.DIM)]
         return [
-            "  " + _paint(_picker_help_line(self.filter_mode), _C.DIM),
-            "  " + _paint("Type or / to filter · Esc clear filter / cancel · q cancel when unfiltered", _C.DIM),
+            "  " + _paint(_picker_help_line(), _C.DIM),
+            "  " + _paint("↑↓ move · ← back · Type or / filter · Esc clear/cancel · q cancel unfiltered", _C.DIM),
             self._marked_line(),
         ]
 
     def handle(self, key: str) -> "Screen | _ExitMarker | None":
         if key in ("esc", "backspace", "space"):
             return self._handle_filter_or_action(key)
+        if key == "confirm":
+            return _EXIT if self._confirm() else None
         if key == "enter":
-            self._confirm()
+            if self._read_error is not None:
+                self._load_entries()
+                self._clamp_cursor(len(self._visible()))
+                return None
+            visible = self._visible()
+            if visible and self._can_enter(visible[self.cursor]):
+                self._enter()
+                return None
+            self._confirm(highlighted=True)
             return _EXIT
         if key == "quit":
             self._cancel()
@@ -855,12 +889,7 @@ class _PickerScreen:
                 self.filter = self.filter[:-1]
                 self.cursor = 0
             return None
-        # space
-        if self.filter_mode:
-            self.filter += " "
-            self.cursor = 0
-        else:
-            self._toggle_mark()
+        self._toggle_mark()
         return None
 
     def _handle_nav(self, key: str) -> None:
@@ -896,13 +925,20 @@ class _PickerScreen:
         if not visible:
             return
         target = visible[self.cursor]
-        if not _is_enterable(target):
+        if not self._can_enter(target):
             return
         self.current = target
-        self.entries = _list_dir_entries(target)
+        self._load_entries()
         self.cursor = 0
         self.filter = ""
         self.filter_mode = False
+
+    def _can_enter(self, target: Path) -> bool:
+        # A listed directory can disappear before the key arrives. Attempt its
+        # read so the failure is visible, while still refusing live symlinks.
+        return (_is_enterable(target)
+                or (target in self._directories and not target.exists()
+                    and not target.is_symlink()))
 
     def _go_up(self) -> None:
         if self.current == self.origin:
@@ -910,7 +946,7 @@ class _PickerScreen:
         previous = self.current
         parent = previous.parent
         self.current = parent
-        self.entries = _list_dir_entries(parent)
+        self._load_entries()
         self.cursor = 0
         try:
             self.cursor = self.entries.index(previous)
@@ -928,13 +964,19 @@ class _PickerScreen:
             self.marked.discard(target)
         else:
             self.marked.add(target)
+        self._notice = None
 
-    def _confirm(self) -> None:
+    def _confirm(self, *, highlighted: bool = False) -> bool:
         if self.marked:
             self.result = sorted(self.marked, key=str)
-            return
-        visible = self._visible()
-        self.result = [visible[self.cursor]] if visible else None
+            return True
+        if highlighted:
+            # Preserve the existing file (and empty-list) Enter contract.
+            visible = self._visible()
+            self.result = [visible[self.cursor]] if visible else None
+            return True
+        self._notice = "Nothing marked. Space marks; Tab confirms."
+        return False
 
     def _cancel(self) -> None:
         self.result = None
