@@ -237,13 +237,14 @@ def test_extract_cancel_creates_no_destination(monkeypatch, tmp_path, quiet_tui,
     assert not destination.exists()
 
 
-def test_extract_no_members_creates_no_destination(monkeypatch, tmp_path, quiet_tui):
+def test_extract_no_members_creates_no_destination(monkeypatch, tmp_path, quiet_tui, capsys):
     archive = make_zip(tmp_path / "one.zip")
     destination = tmp_path / "out"
     monkeypatch.setattr(snug, "_select_archive", lambda: archive)
-    script_menus(monkeypatch, ["d", "m", "n", "r", "r"])
+    script_menus(monkeypatch, ["d", "m", "n", "r", "b", "b"])
     script_prompts(monkeypatch, [str(destination)])
     snug._menu_extract(snug.ArchiveEngine())
+    assert "Nothing marked" in capsys.readouterr().out
     assert not destination.exists()
 
 

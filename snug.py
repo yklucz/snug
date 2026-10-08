@@ -1522,30 +1522,107 @@ def _menu_selected_members(names: list[str], selected: set[str]) -> list[str] | 
     return [name for name in names if name in selected]
 
 
+class _MembersScreen(_MenuScreen):
+    """Edit exact member names on one persistent menu, with rollback on exit."""
+
+    def __init__(self, names: list[str], current: list[str] | None) -> None:
+        self.names = names
+        self.marked = set(names if current is None else current)
+        self._original_marks = set(self.marked)
+        self._original = current
+        self.members_result = current
+        self._notice: str | None = None
+        super().__init__("Choose exact archive members", None, [])
+        self._refresh_options()
+
+    def _refresh_options(self) -> None:
+        count = sum(name in self.marked for name in self.names)
+        self.title = f"Marked ({count}) · Exact archive members"
+        self.options = [
+            ("a", "Select all members"), ("n", "Select no members"),
+            ("r", "Use this selection"), ("b", "Back"),
+        ]
+        self.options.extend((str(index), f"[{'x' if name in self.marked else ' '}] {_safe(name)}")
+                            for index, name in enumerate(self.names, 1))
+
+    def draw(self, cols: int, rows: int) -> list[str]:
+        lines = super().draw(cols, rows)
+        if not self._notice or self._mode == "small":
+            return lines
+        notice = "  " + _paint(self._notice, _C.BOLD_YELLOW)
+        if self._mode == "compact":
+            room = rows - 2 - len(self.footer())
+            return [lines[0], notice] + [self._option_line(i) for i in self._compact_indices(room)]
+        title_row = "  " + _paint(self.title, _C.BOLD)
+        lines[lines.index(title_row) + 1] = notice
+        return lines
+
+    def footer(self) -> list[str]:
+        if self._mode == "small":
+            return []
+        if self._mode == "compact":
+            return [_paint("Space Mark · Tab Confirm · Esc Cancel", _C.DIM)]
+        return [
+            "  " + _paint("Space toggles member · Enter activates row · Tab / r confirm", _C.DIM),
+            "  " + _paint("↑↓ move · a all · n none · Esc / b / q cancel", _C.DIM),
+        ]
+
+    def _activate(self, choice: str | None) -> _ExitMarker | None:
+        if choice is None or choice == "b":
+            self.marked = set(self._original_marks)
+            self.members_result = self._original
+            self._notice = None
+            self._refresh_options()
+            return _EXIT
+        if choice == "r":
+            if not any(name in self.marked for name in self.names):
+                self._notice = "Nothing marked. Space marks; Tab confirms."
+                return None
+            self.members_result = _menu_selected_members(self.names, self.marked)
+            return _EXIT
+        if choice == "a":
+            self.marked = set(self.names)
+        elif choice == "n":
+            self.marked.clear()
+        else:
+            self.marked.symmetric_difference_update((self.names[int(choice) - 1],))
+        self._notice = None
+        self._refresh_options()
+        return None
+
+    def handle(self, key: str) -> "Screen | _ExitMarker | None":
+        if key in ("up", "down"):
+            return super().handle(key)
+        if key in ("esc", "quit", "q", "Q"):
+            return self._activate(None)
+        if key == "confirm":
+            return self._activate("r")
+        if key == "enter":
+            return self._activate(self.options[self.selected][0])
+        if key == "space":
+            choice = self.options[self.selected][0]
+            return self._activate(choice) if choice.isdecimal() else None
+        if _match_option_key(key, self.options):
+            return self._activate(key)
+        return None
+
+
 def _menu_members(engine: ArchiveEngine, archive: Path, password: str | None,
                   current: list[str] | None) -> list[str] | None:
     with _menu_password_errors(password):
         entries = engine.inspect(archive, password=password).entries
     names = list(dict.fromkeys(entry.name for entry in entries))
-    selected = set(names if current is None else current)
-    while True:
-        options = [
-            ("a", "Select all members"), ("n", "Select no members"),
-            ("r", "Use this selection"), ("b", "Back"),
-        ]
-        options.extend((str(index), f"[{'x' if name in selected else ' '}] {_safe(name)}")
-                       for index, name in enumerate(names, 1))
-        choice = _select_menu("Choose exact archive members", options)
-        if choice is None or choice == "b":
-            return current
-        if choice == "r":
-            return _menu_selected_members(names, selected)
-        if choice == "a":
-            selected = set(names)
-        elif choice == "n":
-            selected.clear()
-        else:
-            selected.symmetric_difference_update((names[int(choice) - 1],))
+    screen = _MembersScreen(names, current)
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        _run_screen(screen)
+    else:
+        while True:
+            choice = _select_menu(screen.title, screen.options)
+            if screen._activate(choice) is _EXIT:
+                break
+            if screen._notice:
+                print(f"  {screen._notice}")
+    return screen.members_result
 
 
 _LimitNumber = TypeVar("_LimitNumber", int, float)
