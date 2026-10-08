@@ -8,6 +8,7 @@ optional broad-format and 7z implementations live in snug_ext.
 from __future__ import annotations
 
 import argparse
+import codecs
 import getpass
 import os
 import queue
@@ -17,6 +18,7 @@ import tarfile
 import threading
 import time
 import zipfile
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -199,32 +201,84 @@ def _decode_extended_windows(getch) -> str:
 
 # -- Unix ------------------------------------------------------------------- #
 
+_UNIX_KEY_PUSHBACK: deque[bytes] = deque()
+
+
+def _read_unix_byte(fd: int) -> bytes:
+    if _UNIX_KEY_PUSHBACK:
+        return _UNIX_KEY_PUSHBACK.popleft()
+    return os.read(fd, 1)
+
+
+def _unix_byte_ready(fd: int, timeout: float) -> bool:
+    if _UNIX_KEY_PUSHBACK:
+        return True
+    import select
+
+    return bool(select.select([fd], [], [], timeout)[0])
+
+
+def _read_utf8_key(fd: int, lead: bytes) -> str:
+    """Read one UTF-8 character, with bounded waits for its continuation bytes."""
+    value = lead[0]
+    if 0xC2 <= value <= 0xDF:
+        length = 2
+    elif 0xE0 <= value <= 0xEF:
+        length = 3
+    elif 0xF0 <= value <= 0xF4:
+        length = 4
+    else:
+        return "other"
+
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    try:
+        decoder.decode(lead)
+        character = ""
+        for index in range(length - 1):
+            if not _unix_byte_ready(fd, 0.05):
+                return "other"
+            continuation = _read_unix_byte(fd)
+            if not continuation:
+                return "other"
+            if continuation == b"\x03":
+                raise KeyboardInterrupt
+            if not 0x80 <= continuation[0] <= 0xBF:
+                _UNIX_KEY_PUSHBACK.appendleft(continuation)
+                return "other"
+            character = decoder.decode(continuation, final=index == length - 2)
+    except UnicodeDecodeError:
+        return "other"
+    return character if character.isprintable() else "other"
+
+
 def _read_key_unix() -> str:
     fd = sys.stdin.fileno()
-    b = os.read(fd, 1)
+    b = _read_unix_byte(fd)
     if not b:
         raise KeyboardInterrupt
     if b == b"\x03":
         raise KeyboardInterrupt
     if b == b"\x1b":
         return _read_arrow_sequence(fd)
+    if b[0] >= 0x80:
+        return _read_utf8_key(fd, b)
     return _decode_simple_char(b)
 
 
 def _read_arrow_sequence(fd: int) -> str:
     """Decode an ANSI escape sequence and consume it completely."""
-    import select
-
-    if not select.select([fd], [], [], 0.05)[0]:
+    if not _unix_byte_ready(fd, 0.05):
         return "esc"
-    introducer = os.read(fd, 1)
+    introducer = _read_unix_byte(fd)
     if introducer not in (b"[", b"O"):
+        if introducer:
+            _UNIX_KEY_PUSHBACK.appendleft(introducer)
         return "esc"
 
     while True:
-        if not select.select([fd], [], [], 0.05)[0]:
+        if not _unix_byte_ready(fd, 0.05):
             return "other"
-        b = os.read(fd, 1)
+        b = _read_unix_byte(fd)
         if not b:
             raise KeyboardInterrupt
         if 0x40 <= b[0] <= 0x7E:
@@ -756,10 +810,8 @@ def _read_key_timeout(timeout: float) -> str | None:
                 return _read_key_windows()
             time.sleep(0.02)
         return None
-    import select
     fd = sys.stdin.fileno()
-    ready, _, _ = select.select([fd], [], [], timeout)
-    if not ready:
+    if not _unix_byte_ready(fd, timeout):
         return None
     return _read_key()
 
