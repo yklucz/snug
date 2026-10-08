@@ -57,6 +57,8 @@ The source distribution includes the modules, tests/fixtures, docs, developer sc
 
 The wheel installs `snug`, `snug_core`, `snug_ext`, and `snug_update`, the CLI entry point, and package metadata/license. It does not install tests, docs, CI, managed dependencies, or the managed-only `snug_runtime.py`, lock, and platform scripts into `site-packages`. The complete runtime-management source remains public in Git and the source distribution. Source/pip commands use their chosen environment rather than automatic repair.
 
+After a checkout adds an installed module or changes package metadata, refresh an existing editable installation with `python -m pip install --no-deps -e .`. Editable installs track changes to mapped source files, but setuptools does not automatically regenerate their module mappings or installed version metadata.
+
 Build both artifacts in a temporary or ignored output directory:
 
 ```bash
@@ -66,6 +68,8 @@ python scripts/check_release.py dist
 ```
 
 The release checker requires one source distribution and one wheel in a clean output directory. It compares included public source files with the checkout and rejects unnecessary wheel contents or local/generated files. Install the wheel into a fresh environment and run `snug --version` plus a native ZIP round trip. Validate the source distribution from outside the checkout so imports cannot silently fall back to repository files. Managed Windows artifacts are pinned in the lock; Homebrew packages, pip extras, and the setuptools/build toolchain use version ranges, so identical dependency resolution and byte-for-byte reproducible artifacts are not promised.
+
+For both wheel and editable installations, run the environment's Python with `-I` against [scripts/check_installed_cli.py](../scripts/check_installed_cli.py). This checks the installed executable, module imports, and updater dispatch with mocked release responses and temporary preferences. CI runs it in separate fresh environments so checkout imports cannot hide missing installed modules.
 
 ## Layout work deferred to 2.0
 

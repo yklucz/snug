@@ -37,6 +37,7 @@ def test_size_units_resolve_exact_bytes(text, expected):
     "", " ", "-1", "+1", "1e6", "NaN", "inf", "1m", "1kb", "1KIB", "1Gi",
     "1MiBB", "1MBps", "1 GB", " 1GB", "1GB ", "1/2GB", "1.5", "0.1KiB",
     "1.0000000000000000000000000000000000000001B", "1" * 129,
+    "١KB", "１KiB", "1.٥KB",
 ])
 def test_malformed_ambiguous_or_fractional_byte_sizes_fail(text):
     with pytest.raises(ValueError):

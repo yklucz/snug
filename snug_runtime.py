@@ -330,6 +330,15 @@ def storage(root: Path = APP, shared_bytes: int = 0) -> None:
               "(file bytes; filesystem allocation may differ).", file=sys.stderr)
 
 
+def _run_cli(args: list[str]) -> int:
+    if args and args[0] in ("doctor", "formats"):
+        activate(read_state=False)
+    else:
+        check()
+    from snug import main as snug_main
+    return snug_main(args)
+
+
 def main() -> int:
     command, *args = sys.argv[1:]
     try:
@@ -345,12 +354,7 @@ def main() -> int:
             activate()
             check_backend(args[0])
         elif command == "--run":
-            if args and args[0] in ("doctor", "formats"):
-                activate(read_state=False)
-            else:
-                check()
-            from snug import main as snug_main
-            return snug_main(args)
+            return _run_cli(args)
         else:
             raise RuntimeError("unknown runtime command")
     except (OSError, ValueError, RuntimeError, ImportError, AttributeError, ArchiveError) as exc:

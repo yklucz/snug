@@ -21,7 +21,7 @@ import threading
 import time
 import zipfile
 import zlib
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, localcontext
 from enum import Enum
@@ -32,6 +32,8 @@ __version__ = "1.9.0"
 
 CHUNK_SIZE = 1 << 20      # 1 MiB
 _TTY_REFRESH = 0.1        # seconds between progress redraws
+_TAR_PASSWORD_MESSAGE = "TAR archives do not support passwords"
+_STREAM_PASSWORD_MESSAGE = "standalone compression streams do not support passwords"
 
 
 # --------------------------------------------------------------------------- #
@@ -207,7 +209,7 @@ class ExtractionLimits:
 
 def parse_size(text: str) -> int:
     """Parse exact byte amounts: decimal K/KB and binary KiB through TiB."""
-    match = re.fullmatch(r'([0-9]+(?:\.[0-9]+)?)(B|[KMGT](?:B|iB)?)?', text) if len(text) <= 128 else None
+    match = re.fullmatch(r'(\d+(?:\.\d+)?)(B|[KMGT](?:B|iB)?)?', text, re.ASCII) if len(text) <= 128 else None
     if match is None:
         raise ValueError('size must be bytes or a decimal K/KB/MB/GB/TB or binary KiB/MiB/GiB/TiB amount')
     number, unit = match.groups()
@@ -485,8 +487,8 @@ def _normalize_format(fmt) -> ArchiveFormat:
     if isinstance(fmt, ArchiveFormat):
         return fmt
     value = str(fmt).lower().lstrip(".")
-    aliases = {"gzip": "gz", "bzip2": "bz2", "tgz": "tar.gz", "tbz": "tar.bz2",
-               "tbz2": "tar.bz2", "txz": "tar.xz", "seven_zip": "7z"}
+    aliases = {"gzip": "gz", "bzip2": "bz2", "tgz": "tar.gz", "tbz": ArchiveFormat.TAR_BZ2.value,
+               "tbz2": ArchiveFormat.TAR_BZ2.value, "txz": "tar.xz", "seven_zip": "7z"}
     return ArchiveFormat(aliases.get(value, value))
 
 
@@ -1005,6 +1007,38 @@ class ArchiveInspection:
     metadata: dict
 
 
+def _validate_symlink_target(entry: ArchiveEntry, parts: list[str]) -> None:
+    link = (entry.link_target or "").replace("\\", "/")
+    if not link or link.startswith("/") or _DRIVE_RE.match(link) or "\0" in link:
+        raise UnsafeArchiveError(f"unsafe symlink target: {entry.name!r} -> {entry.link_target!r}")
+    resolved = parts[:-1].copy()
+    for part in link.split("/"):
+        if part == "..":
+            if not resolved:
+                raise UnsafeArchiveError(f"escaping symlink: {entry.name!r} -> {entry.link_target!r}")
+            resolved.pop()
+        elif part not in ("", "."):
+            _clean_parts(part)
+            resolved.append(part)
+
+
+def _register_output_path(entry: ArchiveEntry, parts: list[str],
+                          outputs: dict[tuple[str, ...], ArchiveEntry],
+                          parents: set[tuple[str, ...]]) -> None:
+    key = tuple(os.path.normcase(part) for part in parts)
+    prior = outputs.get(key)
+    if prior is not None and not (prior.is_dir and entry.is_dir):
+        raise UnsafeArchiveError(f"duplicate output path in archive: {entry.name!r}")
+    for length in range(1, len(key)):
+        ancestor = outputs.get(key[:length])
+        if ancestor is not None and not ancestor.is_dir:
+            raise UnsafeArchiveError(f"member has a non-directory parent: {entry.name!r}")
+    if not entry.is_dir and key in parents:
+        raise UnsafeArchiveError(f"member replaces an archive parent: {entry.name!r}")
+    outputs[key] = entry
+    parents.update(key[:length] for length in range(1, len(key)))
+
+
 def _validate_structure(entries: Sequence[ArchiveEntry], members=None, strip: int = 0,
                         *, symlinks: str = "store") -> None:
     """Validate names and selected output collisions without touching disk."""
@@ -1020,30 +1054,8 @@ def _validate_structure(entries: Sequence[ArchiveEntry], members=None, strip: in
         if not parts:
             continue
         if entry.is_symlink and symlinks == "store" and entry.link_target is not None:
-            link = entry.link_target.replace("\\", "/")
-            if not link or link.startswith("/") or _DRIVE_RE.match(link) or "\0" in link:
-                raise UnsafeArchiveError(f"unsafe symlink target: {entry.name!r} -> {entry.link_target!r}")
-            resolved = parts[:-1].copy()
-            for part in link.split("/"):
-                if part == "..":
-                    if not resolved:
-                        raise UnsafeArchiveError(f"escaping symlink: {entry.name!r} -> {entry.link_target!r}")
-                    resolved.pop()
-                elif part not in ("", "."):
-                    _clean_parts(part)
-                    resolved.append(part)
-        key = tuple(os.path.normcase(part) for part in parts)
-        prior = outputs.get(key)
-        if prior is not None and not (prior.is_dir and entry.is_dir):
-            raise UnsafeArchiveError(f"duplicate output path in archive: {entry.name!r}")
-        for length in range(1, len(key)):
-            ancestor = outputs.get(key[:length])
-            if ancestor is not None and not ancestor.is_dir:
-                raise UnsafeArchiveError(f"member has a non-directory parent: {entry.name!r}")
-        if not entry.is_dir and key in parents:
-            raise UnsafeArchiveError(f"member replaces an archive parent: {entry.name!r}")
-        outputs[key] = entry
-        parents.update(key[:length] for length in range(1, len(key)))
+            _validate_symlink_target(entry, parts)
+        _register_output_path(entry, parts, outputs, parents)
 
 
 # --------------------------------------------------------------------------- #
@@ -1176,26 +1188,30 @@ class SafeOutputFile:
                 self.temporary.unlink(missing_ok=True)
 
 
+def _abort_output(output: SafeOutputFile, failures: list[tuple[str, OSError]]) -> None:
+    try:
+        output.abort()
+    except OSError as exc:
+        if not failures:
+            failures.append((output.entry.name, exc))
+
+
 def _abort_outputs(outputs: Iterable[SafeOutputFile]) -> None:
-    """Attempt every cleanup, retaining an in-flight decoding/interruption error."""
+    """Attempt every cleanup; filesystem failures retain an in-flight error."""
     primary = sys.exc_info()[1]
-    failure: tuple[str, BaseException] | None = None
-    for output in outputs:
-        try:
-            output.abort()
-        except BaseException as exc:
-            if failure is None:
-                failure = (output.entry.name, exc)
-    if failure is None:
+    failures: list[tuple[str, OSError]] = []
+    with ExitStack() as cleanup:
+        # ExitStack still runs remaining callbacks if one cleanup is interrupted.
+        for output in reversed(list(outputs)):
+            cleanup.callback(_abort_output, output, failures)
+    if not failures:
         return
-    name, error = failure
+    name, error = failures[0]
     message = f"cannot clean extraction staging for {name!r}: {error}"
     if primary is not None:
         add_note = getattr(primary, "add_note", None)
         if add_note is not None:
             add_note(message)
-    elif isinstance(error, (KeyboardInterrupt, SystemExit)):
-        raise error
     else:
         raise ArchiveError(message) from error
 
@@ -1359,7 +1375,7 @@ class NativeBackend:
                 return ArchiveInspection([_zip_entry(i) for i in infos],
                                          {"encrypted": any(i.flag_bits & 1 for i in infos)})
         if password is not None:
-            raise ArchiveError("TAR archives do not support passwords")
+            raise ArchiveError(_TAR_PASSWORD_MESSAGE)
         with tarfile.open(path, "r:*") as tf:
             return ArchiveInspection([_tar_entry(m) for m in tf.getmembers()], {"encrypted": False})
 
@@ -1371,25 +1387,34 @@ class NativeBackend:
 
     def test(self, path: Path, inspection: ArchiveInspection, progress: ProgressSink,
              password=None) -> int:
-        total = 0
         fmt = detect_format(path)
         if fmt in (ArchiveFormat.ZIP, ArchiveFormat.ZIPX):
-            with zipfile.ZipFile(path) as archive:
-                for info in archive.infolist():
-                    entry = _zip_entry(info)
-                    progress.item(entry.name)
-                    if entry.is_dir or entry.is_special:
-                        continue
-                    try:
-                        with archive.open(info, pwd=_password_bytes(password)) as source:
-                            total += _test_chunks(entry, _read_chunks(source), progress)
-                    except ArchiveError:
-                        raise
-                    except Exception as exc:
-                        raise ArchiveError(f"member {entry.name!r}: {exc}") from exc
-            return total
+            return self._test_zip(path, progress, password)
         if password is not None:
-            raise ArchiveError("TAR archives do not support passwords")
+            raise ArchiveError(_TAR_PASSWORD_MESSAGE)
+        return self._test_tar(path, progress)
+
+    @staticmethod
+    def _test_zip(path: Path, progress: ProgressSink, password=None) -> int:
+        total = 0
+        with zipfile.ZipFile(path) as archive:
+            for info in archive.infolist():
+                entry = _zip_entry(info)
+                progress.item(entry.name)
+                if entry.is_dir or entry.is_special:
+                    continue
+                try:
+                    with archive.open(info, pwd=_password_bytes(password)) as source:
+                        total += _test_chunks(entry, _read_chunks(source), progress)
+                except ArchiveError:
+                    raise
+                except Exception as exc:
+                    raise ArchiveError(f"member {entry.name!r}: {exc}") from exc
+        return total
+
+    @staticmethod
+    def _test_tar(path: Path, progress: ProgressSink) -> int:
+        total = 0
         last = path.name
         with tarfile.open(path, "r:*") as archive:
             for member in archive:
@@ -1408,12 +1433,10 @@ class NativeBackend:
                     raise
                 except Exception as exc:
                     raise ArchiveError(f"member {entry.name!r}: {exc}") from exc
-            if isinstance(archive.fileobj, (gzip.GzipFile, bz2.BZ2File, lzma.LZMAFile)):
-                try:
-                    while archive.fileobj.read(CHUNK_SIZE):
-                        pass
-                except Exception as exc:
-                    raise ArchiveError(f"member {last!r}, compressed TAR trailer: {exc}") from exc
+            try:
+                _consume_tar_trailer(archive)
+            except Exception as exc:
+                raise ArchiveError(f"member {last!r}, compressed TAR trailer: {exc}") from exc
         return total
 
     def create(self, archive_path, items, fmt, compresslevel, symlinks,
@@ -1431,7 +1454,7 @@ class NativeBackend:
             self._extract_zip(archive_path, ctx, password)
         else:
             if password is not None:
-                raise ArchiveError("TAR archives do not support passwords")
+                raise ArchiveError(_TAR_PASSWORD_MESSAGE)
             self._extract_tar(archive_path, ctx)
 
     # -- TAR creation ---------------------------------------------------- #
@@ -1635,11 +1658,7 @@ class NativeBackend:
             for member in members:
                 ctx.progress.item(member.name)
                 self._extract_tar_member(tf, member, ctx)
-            # TAR's end marker can precede a compression trailer. Consume the
-            # remaining decoder stream before publishing any staged payload.
-            if isinstance(tf.fileobj, (gzip.GzipFile, bz2.BZ2File, lzma.LZMAFile)):
-                while tf.fileobj.read(CHUNK_SIZE):
-                    pass
+            _consume_tar_trailer(tf)
 
     def _extract_tar_member(self, tf, member: tarfile.TarInfo,
                             ctx: _ExtractContext) -> None:
@@ -1721,6 +1740,15 @@ def _tar_entry(member: tarfile.TarInfo) -> ArchiveEntry:
         mode=stat.S_IMODE(member.mode),
         mtime=float(member.mtime),
     )
+
+
+def _consume_tar_trailer(archive: tarfile.TarFile) -> None:
+    # TAR's end marker can precede the compression trailer. Read to decoder EOF
+    # to validate that trailer before accepting or publishing the payload.
+    if isinstance(archive.fileobj, (gzip.GzipFile, bz2.BZ2File, lzma.LZMAFile)):
+        while archive.fileobj.read(CHUNK_SIZE):
+            # Remaining decoded TAR padding is intentionally discarded.
+            pass
 
 
 def _read_chunks(source) -> Iterable[bytes]:
@@ -1808,7 +1836,7 @@ class StreamBackend:
 
     def inspect(self, path: Path, password=None, *, streaming: bool = False) -> ArchiveInspection:
         if password is not None:
-            raise ArchiveError("standalone compression streams do not support passwords")
+            raise ArchiveError(_STREAM_PASSWORD_MESSAGE)
         fmt = detect_format(path)
         size = 0
         if not streaming:
@@ -1830,7 +1858,7 @@ class StreamBackend:
     def test(self, path: Path, inspection: ArchiveInspection, progress: ProgressSink,
              password=None) -> int:
         if password is not None:
-            raise ArchiveError("standalone compression streams do not support passwords")
+            raise ArchiveError(_STREAM_PASSWORD_MESSAGE)
         entry = inspection.entries[0]
         progress.item(entry.name)
         try:
@@ -1844,7 +1872,7 @@ class StreamBackend:
     def create(self, archive_path, items, fmt, compresslevel, symlinks,
                report, progress, password=None) -> None:
         if password is not None:
-            raise ArchiveError("standalone compression streams do not support passwords")
+            raise ArchiveError(_STREAM_PASSWORD_MESSAGE)
         if len(items) != 1 or not items[0][0].is_file() or (items[0][0].is_symlink() and symlinks != "follow"):
             raise ArchiveError("standalone compression requires exactly one regular file")
         source, name = items[0]
@@ -1861,7 +1889,7 @@ class StreamBackend:
 
     def extract(self, archive_path, ctx: _ExtractContext, password=None) -> None:
         if password is not None:
-            raise ArchiveError("standalone compression streams do not support passwords")
+            raise ArchiveError(_STREAM_PASSWORD_MESSAGE)
         # Unknown decoded size avoids a redundant unbounded preflight decode.
         inspection = ctx.inspection or self.inspect(archive_path, password, streaming=True)
         entry = inspection.entries[0]
@@ -1989,6 +2017,10 @@ class ArchiveEngine:
                          if key not in info})
             return info
 
+    @staticmethod
+    def _inspect_stream(backend: StreamBackend, path: Path, password=None) -> ArchiveInspection:
+        return backend.inspect(path, password, streaming=True)
+
     def test(self, archive, *, password=None, progress: ProgressSink | None = None) -> TestReport:
         path = self._archive_path(archive)
         progress = progress or NullProgress()
@@ -1996,7 +2028,7 @@ class ArchiveEngine:
         with self._operation():
             fmt = detect_format(path)
             backend = self._read_backend(path, fmt)
-            inspection = (backend.inspect(path, password, streaming=True) if isinstance(backend, StreamBackend)
+            inspection = (self._inspect_stream(backend, path, password) if isinstance(backend, StreamBackend)
                           else backend.inspect(path, password=password))
             entries = inspection.entries
             _validate_structure(entries)
@@ -2085,7 +2117,7 @@ class ArchiveEngine:
             selected_members = set(members) if isinstance(members, (list, tuple, set, frozenset)) else members
             budget = _ExtractionBudget(limits)
             if isinstance(backend, StreamBackend):
-                inspection = backend.inspect(path, password, streaming=True)
+                inspection = self._inspect_stream(backend, path, password)
             else:
                 inspection = backend.inspect(path, password=password)
             entries = inspection.entries

@@ -18,9 +18,9 @@ import threading
 import time
 import zipfile
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Protocol, Sequence
+from typing import TYPE_CHECKING, Callable, Protocol, Sequence, TypeVar
 
 if TYPE_CHECKING:
     from snug_update import AutomaticCheck
@@ -33,6 +33,10 @@ from snug_core import (
     _ARCHIVE_SUFFIXES, _C, _file_size, _init_color, _iter_items, _paint,
     _safe, _truncate, _visible_len, detect_format, human_bytes, human_time,
 )
+
+
+_CANCELLED_MESSAGE = "\n  Cancelled."
+_INTERRUPTED_MESSAGE = "\ninterrupted"
 
 
 class _QuitInteractive(Exception):
@@ -1069,6 +1073,137 @@ def _menu_password_supported(archive: Path) -> bool:
                                       ArchiveFormat.SEVEN_ZIP)
 
 
+def _menu_unavailable(message: str) -> None:
+    _clear_screen()
+    print(f"  {message}")
+    _wait_for_enter()
+
+
+def _menu_password_label(password: str | None, supported: bool, unavailable: str) -> str:
+    if not supported:
+        return "Password: unavailable for this " + unavailable
+    status = "set" if password is not None else "none"
+    return f"Password: {status}"
+
+
+def _menu_edit_password(current: str | None, supported: bool, message: str) -> str | None:
+    if supported:
+        return _menu_password(current)
+    _menu_unavailable(message)
+    return current
+
+
+@dataclass
+class _CreateOptions:
+    cwd: Path
+    sources: list[Path]
+    supported: list[ArchiveFormat]
+    fmt: ArchiveFormat
+    archive_path: Path
+    compresslevel: int | None = None
+    password: str | None = None
+    symlinks: str = "store"
+
+    def menu_options(self) -> list[tuple[str, str]]:
+        shown_sources = ", ".join(_safe(str(path)) for path in self.sources)
+        compression = "Compression: unavailable for this writer"
+        if _menu_compression_supported(self.fmt):
+            level = "default" if self.compresslevel is None else str(self.compresslevel)
+            compression = f"Compression: {level}"
+        return [
+            ("s", f"Sources: {len(self.sources)} selected — {shown_sources}"),
+            ("o", f"Output: {_safe(self.archive_path)}"),
+            ("f", f"Format: {self.fmt.value}"),
+            ("l", compression),
+            ("p", _menu_password_label(self.password, self.fmt is ArchiveFormat.SEVEN_ZIP, "writer")),
+            ("y", f"Symlinks: {self.symlinks}"),
+            ("r", "Create archive"),
+            ("b", "Back"),
+        ]
+
+    def set_writer(self, fmt: ArchiveFormat) -> None:
+        self.fmt = fmt
+        if fmt is not ArchiveFormat.SEVEN_ZIP:
+            self.password = None
+        if not _menu_compression_supported(fmt):
+            self.compresslevel = None
+
+    def select_sources(self) -> None:
+        picked = _select_sources_arrow(self.cwd)
+        if picked:
+            self.sources = picked
+
+    def select_output(self) -> None:
+        _clear_screen()
+        candidate = self.cwd / _prompt("Output archive", str(self.archive_path))
+        if not candidate.name.lower().endswith(_ARCHIVE_SUFFIXES):
+            self.archive_path = _menu_format_path(candidate, self.fmt)
+            return
+        fmt = detect_format(candidate, for_write=True)
+        if fmt not in self.supported:
+            raise FormatError(f"cannot create {fmt.value}; choose an installed writer")
+        self.set_writer(fmt)
+        self.archive_path = candidate
+
+    def select_format(self) -> None:
+        formats = [(str(index), value.value) for index, value in enumerate(self.supported, 1)]
+        formats.append(("b", "Back"))
+        selected = _select_menu("Choose an installed writer", formats)
+        if selected is not None and selected != "b":
+            self.set_writer(self.supported[int(selected) - 1])
+            self.archive_path = _menu_format_path(self.archive_path, self.fmt)
+
+    def select_compression(self) -> None:
+        if _menu_compression_supported(self.fmt):
+            self.compresslevel = _menu_compression(self.compresslevel)
+        else:
+            _menu_unavailable("This writer does not support a compression level.")
+
+    def select_password(self) -> None:
+        self.password = _menu_edit_password(
+            self.password, self.fmt is ArchiveFormat.SEVEN_ZIP,
+            "Password-protected creation requires an installed 7z writer.",
+        )
+
+    def select_symlinks(self) -> None:
+        selected = _select_menu("Symlink policy", [
+            ("s", "Store links"), ("f", "Follow links"),
+            ("k", "Skip links"), ("b", "Back"),
+        ])
+        self.symlinks = {"s": "store", "f": "follow", "k": "skip"}.get(selected or "", self.symlinks)
+
+
+def _configure_create(options: _CreateOptions) -> bool:
+    handlers = {
+        "s": options.select_sources, "o": options.select_output,
+        "f": options.select_format, "l": options.select_compression,
+        "p": options.select_password, "y": options.select_symlinks,
+    }
+    while True:
+        choice = _select_menu("Create archive options", options.menu_options(), subtitle=str(options.cwd))
+        if choice is None or choice == "b":
+            return False
+        if choice == "r":
+            return True
+        handlers[choice]()
+
+
+def _menu_confirm_overwrite(archive: Path) -> bool:
+    if not archive.exists():
+        return True
+    _clear_screen()
+    answer = _prompt(f"{archive} exists. Overwrite? (y/N)", "n").lower()
+    if answer in ("y", "yes"):
+        return True
+    print("  Cancelled; existing archive was not changed.")
+    return False
+
+
+def _print_menu_skipped(names: Sequence[str]) -> None:
+    for name in names:
+        print(f"  skipped: {_safe(name)}", file=sys.stderr)
+
+
 def _menu_create(engine: ArchiveEngine) -> None:
     cwd = Path.cwd()
     sources = _select_sources_arrow(cwd)
@@ -1076,105 +1211,27 @@ def _menu_create(engine: ArchiveEngine) -> None:
         _clear_screen()
         print("\n  No sources selected; cancelled.")
         return
-
     supported = engine.writable_formats()
     if not supported:
         raise FormatError("no archive writers are available")
     fmt = ArchiveFormat.TAR_GZ if ArchiveFormat.TAR_GZ in supported else supported[0]
-    archive_path = cwd / ("archive." + fmt.value)
-    compresslevel: int | None = None
-    password: str | None = None
-    symlinks = "store"
-    while True:
-        shown_sources = ", ".join(_safe(str(path)) for path in sources)
-        choice = _select_menu("Create archive options", [
-            ("s", f"Sources: {len(sources)} selected — {shown_sources}"),
-            ("o", f"Output: {_safe(archive_path)}"),
-            ("f", f"Format: {fmt.value}"),
-            ("l", (f"Compression: {'default' if compresslevel is None else compresslevel}"
-                   if _menu_compression_supported(fmt) else "Compression: unavailable for this writer")),
-            ("p", (f"Password: {'set' if password is not None else 'none'}"
-                   if fmt is ArchiveFormat.SEVEN_ZIP else "Password: unavailable for this writer")),
-            ("y", f"Symlinks: {symlinks}"),
-            ("r", "Create archive"),
-            ("b", "Back"),
-        ], subtitle=str(cwd))
-        if choice is None or choice == "b":
-            return
-        if choice == "s":
-            picked = _select_sources_arrow(cwd)
-            if picked:
-                sources = picked
-        elif choice == "o":
-            _clear_screen()
-            raw = _prompt("Output archive", str(archive_path))
-            candidate = cwd / raw
-            if candidate.name.lower().endswith(_ARCHIVE_SUFFIXES):
-                candidate_format = detect_format(candidate, for_write=True)
-                if candidate_format not in supported:
-                    raise FormatError(f"cannot create {candidate_format.value}; choose an installed writer")
-                fmt = candidate_format
-                if fmt is not ArchiveFormat.SEVEN_ZIP:
-                    password = None
-                if not _menu_compression_supported(fmt):
-                    compresslevel = None
-                archive_path = candidate
-            else:
-                archive_path = _menu_format_path(candidate, fmt)
-        elif choice == "f":
-            formats = [(str(index), value.value) for index, value in enumerate(supported, 1)]
-            formats.append(("b", "Back"))
-            selected = _select_menu("Choose an installed writer", formats)
-            if selected is not None and selected != "b":
-                fmt = supported[int(selected) - 1]
-                if fmt is not ArchiveFormat.SEVEN_ZIP:
-                    password = None
-                if not _menu_compression_supported(fmt):
-                    compresslevel = None
-                archive_path = _menu_format_path(archive_path, fmt)
-        elif choice == "l":
-            if _menu_compression_supported(fmt):
-                compresslevel = _menu_compression(compresslevel)
-            else:
-                _clear_screen()
-                print("  This writer does not support a compression level.")
-                _wait_for_enter()
-        elif choice == "p":
-            if fmt is ArchiveFormat.SEVEN_ZIP:
-                password = _menu_password(password)
-            else:
-                _clear_screen()
-                print("  Password-protected creation requires an installed 7z writer.")
-                _wait_for_enter()
-        elif choice == "y":
-            selected = _select_menu("Symlink policy", [
-                ("s", "Store links"), ("f", "Follow links"),
-                ("k", "Skip links"), ("b", "Back"),
-            ])
-            symlinks = {"s": "store", "f": "follow", "k": "skip"}.get(selected or "", symlinks)
-        elif choice == "r":
-            break
-
-    if archive_path.exists():
-        _clear_screen()
-        answer = _prompt(f"{archive_path} exists. Overwrite? (y/N)", "n").lower()
-        if answer not in ("y", "yes"):
-            print("  Cancelled; existing archive was not changed.")
-            return
+    options = _CreateOptions(cwd, sources, supported, fmt, cwd / ("archive." + fmt.value))
+    if not _configure_create(options) or not _menu_confirm_overwrite(options.archive_path):
+        return
 
     _clear_screen()
     print()
-    archive_real = os.path.realpath(archive_path)
+    archive_real = os.path.realpath(options.archive_path)
     try:
         precollected = _interactive_enumerate(
-            sources,
+            options.sources,
             root=cwd,
-            symlinks=symlinks,
+            symlinks=options.symlinks,
             archive_real=archive_real,
         )
     except KeyboardInterrupt:
         _clear_screen()
-        print("\n  Cancelled.")
+        print(_CANCELLED_MESSAGE)
         return
     if precollected is None:
         _clear_screen()
@@ -1183,23 +1240,27 @@ def _menu_create(engine: ArchiveEngine) -> None:
 
     print()
     display = ProgressDisplay("create")
-    with _menu_password_errors(password):
+    with _menu_password_errors(options.password):
         report = engine.create(
-            archive_path,
-            sources,
-            fmt=fmt,
+            options.archive_path,
+            options.sources,
+            fmt=options.fmt,
             root=cwd,
-            compresslevel=compresslevel,
-            symlinks=symlinks,
-            password=password,
+            compresslevel=options.compresslevel,
+            symlinks=options.symlinks,
+            password=options.password,
             progress=display,
             precollected=precollected,
         )
     print()
     _print_create_summary(report)
-    if report.skipped:
-        for name in report.skipped:
-            print(f"  skipped: {_safe(name)}", file=sys.stderr)
+    _print_menu_skipped(report.skipped)
+
+
+def _menu_selected_members(names: list[str], selected: set[str]) -> list[str] | None:
+    if selected == set(names):
+        return None
+    return [name for name in names if name in selected]
 
 
 def _menu_members(engine: ArchiveEngine, archive: Path, password: str | None,
@@ -1219,132 +1280,164 @@ def _menu_members(engine: ArchiveEngine, archive: Path, password: str | None,
         if choice is None or choice == "b":
             return current
         if choice == "r":
-            return None if selected == set(names) else [name for name in names if name in selected]
+            return _menu_selected_members(names, selected)
         if choice == "a":
             selected = set(names)
         elif choice == "n":
             selected.clear()
         else:
-            name = names[int(choice) - 1]
-            if name in selected:
-                selected.remove(name)
-            else:
-                selected.add(name)
+            selected.symmetric_difference_update((names[int(choice) - 1],))
+
+
+_LimitNumber = TypeVar("_LimitNumber", int, float)
+
+
+def _menu_limit_label(value: int | float | None) -> str:
+    return "none" if value is None else str(value)
+
+
+def _menu_limit_value(current: _LimitNumber | None,
+                      parser: Callable[[str], _LimitNumber]) -> _LimitNumber | None:
+    _clear_screen()
+    while True:
+        raw = _prompt("Limit (or none)", _menu_limit_label(current))
+        try:
+            if raw.lower() == "none":
+                return None
+            return parser(raw)
+        except (ValueError, argparse.ArgumentTypeError) as exc:
+            print(f"  {_safe(exc)}")
 
 
 def _menu_limits(current: ExtractionLimits) -> ExtractionLimits:
     entries, total, per_file, ratio = (current.max_entries, current.max_total_size,
                                       current.max_file_size, current.max_ratio)
     while True:
-        def shown(value: int | float | None) -> str:
-            return "none" if value is None else str(value)
-
         choice = _select_menu("Extraction limits", [
-            ("e", f"Selected entries: {shown(entries)}"),
-            ("s", f"Total decoded bytes: {shown(total)}"),
-            ("f", f"Decoded bytes per member: {shown(per_file)}"),
-            ("r", f"Compression ratio: {shown(ratio)}"),
+            ("e", f"Selected entries: {_menu_limit_label(entries)}"),
+            ("s", f"Total decoded bytes: {_menu_limit_label(total)}"),
+            ("f", f"Decoded bytes per member: {_menu_limit_label(per_file)}"),
+            ("r", f"Compression ratio: {_menu_limit_label(ratio)}"),
             ("b", "Use these limits"),
         ], subtitle="No limits by default. K/KB are decimal; KiB is binary. Enter none to clear.")
         if choice is None or choice == "b":
             return ExtractionLimits(entries, total, per_file, ratio)
+        if choice == "e":
+            entries = _menu_limit_value(entries, _parse_count)
+        elif choice == "s":
+            total = _menu_limit_value(total, parse_size)
+        elif choice == "f":
+            per_file = _menu_limit_value(per_file, parse_size)
+        elif choice == "r":
+            ratio = _menu_limit_value(ratio, _parse_ratio)
+
+
+@dataclass
+class _ExtractOptions:
+    archive: Path
+    password_supported: bool
+    destination: str = "."
+    members: list[str] | None = None
+    overwrite: bool = True
+    metadata: bool = True
+    symlinks: str = "store"
+    strip_components: int = 0
+    password: str | None = None
+    limits: ExtractionLimits = field(default_factory=ExtractionLimits)
+
+    def menu_options(self) -> list[tuple[str, str]]:
+        limited = any(value is not None for value in (
+            self.limits.max_entries, self.limits.max_total_size,
+            self.limits.max_file_size, self.limits.max_ratio,
+        ))
+        return [
+            ("d", f"Destination: {_safe(self.destination)}"),
+            ("m", "Members: all" if self.members is None else f"Members: {len(self.members)} exact member(s)"),
+            ("o", f"Overwrite: {'yes' if self.overwrite else 'no'}"),
+            ("t", f"Metadata: {'preserve' if self.metadata else 'skip'}"),
+            ("y", f"Symlinks: {self.symlinks}"),
+            ("s", f"Strip components: {self.strip_components}"),
+            ("p", _menu_password_label(self.password, self.password_supported, "format")),
+            ("l", f"Limits: {'set' if limited else 'none'}"),
+            ("r", "Extract archive"), ("b", "Back"),
+        ]
+
+    def select_destination(self) -> None:
         _clear_screen()
-        old = {"e": entries, "s": total, "f": per_file, "r": ratio}[choice]
+        self.destination = _prompt("Destination directory", self.destination)
+
+    def select_members(self, engine: ArchiveEngine) -> None:
+        self.members = _menu_members(engine, self.archive, self.password, self.members)
+
+    def toggle_overwrite(self) -> None:
+        self.overwrite = not self.overwrite
+
+    def toggle_metadata(self) -> None:
+        self.metadata = not self.metadata
+
+    def toggle_symlinks(self) -> None:
+        self.symlinks = "skip" if self.symlinks == "store" else "store"
+
+    def select_strip_components(self) -> None:
+        _clear_screen()
         while True:
-            raw = _prompt("Limit (or none)", shown(old))
             try:
-                if choice == "e":
-                    entries = None if raw.lower() == "none" else _parse_count(raw)
-                elif choice == "s":
-                    total = None if raw.lower() == "none" else parse_size(raw)
-                elif choice == "f":
-                    per_file = None if raw.lower() == "none" else parse_size(raw)
-                elif choice == "r":
-                    ratio = None if raw.lower() == "none" else _parse_ratio(raw)
-                break
-            except (ValueError, argparse.ArgumentTypeError) as exc:
+                self.strip_components = _parse_count(_prompt("Strip components", str(self.strip_components)))
+                return
+            except argparse.ArgumentTypeError as exc:
                 print(f"  {_safe(exc)}")
+
+    def select_password(self) -> None:
+        self.password = _menu_edit_password(
+            self.password, self.password_supported,
+            "This format does not support passwords in Snug.",
+        )
+
+    def select_limits(self) -> None:
+        self.limits = _menu_limits(self.limits)
+
+
+def _configure_extract(engine: ArchiveEngine, options: _ExtractOptions) -> bool:
+    handlers = {
+        "d": options.select_destination, "m": lambda: options.select_members(engine),
+        "o": options.toggle_overwrite, "t": options.toggle_metadata,
+        "y": options.toggle_symlinks, "s": options.select_strip_components,
+        "p": options.select_password, "l": options.select_limits,
+    }
+    while True:
+        choice = _select_menu("Extract archive options", options.menu_options(), subtitle=str(options.archive))
+        if choice is None or choice == "b":
+            return False
+        if choice == "r":
+            if options.members == []:
+                print("  No members selected; cancelled.")
+                return False
+            return True
+        handlers[choice]()
 
 
 def _menu_extract(engine: ArchiveEngine) -> None:
     archive = _select_archive()
     if archive is None:
         _clear_screen()
-        print("\n  Cancelled.")
+        print(_CANCELLED_MESSAGE)
         return
 
-    destination = "."
-    members: list[str] | None = None
-    overwrite, metadata = True, True
-    symlinks = "store"
-    strip_components = 0
-    password: str | None = None
-    password_supported = _menu_password_supported(archive)
-    limits = ExtractionLimits()
-    while True:
-        limited = any(value is not None for value in
-                      (limits.max_entries, limits.max_total_size, limits.max_file_size, limits.max_ratio))
-        choice = _select_menu("Extract archive options", [
-            ("d", f"Destination: {_safe(destination)}"),
-            ("m", "Members: all" if members is None else f"Members: {len(members)} exact member(s)"),
-            ("o", f"Overwrite: {'yes' if overwrite else 'no'}"),
-            ("t", f"Metadata: {'preserve' if metadata else 'skip'}"),
-            ("y", f"Symlinks: {symlinks}"),
-            ("s", f"Strip components: {strip_components}"),
-            ("p", (f"Password: {'set' if password is not None else 'none'}"
-                   if password_supported else "Password: unavailable for this format")),
-            ("l", f"Limits: {'set' if limited else 'none'}"),
-            ("r", "Extract archive"), ("b", "Back"),
-        ], subtitle=str(archive))
-        if choice is None or choice == "b":
-            return
-        if choice == "d":
-            _clear_screen()
-            destination = _prompt("Destination directory", destination)
-        elif choice == "m":
-            members = _menu_members(engine, archive, password, members)
-        elif choice == "o":
-            overwrite = not overwrite
-        elif choice == "t":
-            metadata = not metadata
-        elif choice == "y":
-            symlinks = "skip" if symlinks == "store" else "store"
-        elif choice == "s":
-            _clear_screen()
-            while True:
-                try:
-                    strip_components = _parse_count(_prompt("Strip components", str(strip_components)))
-                    break
-                except argparse.ArgumentTypeError as exc:
-                    print(f"  {_safe(exc)}")
-        elif choice == "p":
-            if password_supported:
-                password = _menu_password(password)
-            else:
-                _clear_screen()
-                print("  This format does not support passwords in Snug.")
-                _wait_for_enter()
-        elif choice == "l":
-            limits = _menu_limits(limits)
-        elif choice == "r":
-            if members == []:
-                print("  No members selected; cancelled.")
-                return
-            break
+    options = _ExtractOptions(archive, _menu_password_supported(archive))
+    if not _configure_extract(engine, options):
+        return
 
     _clear_screen()
-    print(f"\n  Extracting {_safe(archive.name)} into {_safe(destination)}…\n")
+    print(f"\n  Extracting {_safe(archive.name)} into {_safe(options.destination)}…\n")
     display = ProgressDisplay("extract")
-    with _menu_password_errors(password):
-        report = engine.extract(archive, destination, members=members, overwrite=overwrite,
-                                preserve_metadata=metadata, symlinks=symlinks,
-                                strip_components=strip_components, password=password,
-                                limits=limits, progress=display)
+    with _menu_password_errors(options.password):
+        report = engine.extract(archive, options.destination, members=options.members, overwrite=options.overwrite,
+                                preserve_metadata=options.metadata, symlinks=options.symlinks,
+                                strip_components=options.strip_components, password=options.password,
+                                limits=options.limits, progress=display)
     print()
     _print_extract_summary(report)
-    if report.skipped:
-        for name in report.skipped:
-            print(f"  skipped: {_safe(name)}", file=sys.stderr)
+    _print_menu_skipped(report.skipped)
 
 
 def _menu_test(engine: ArchiveEngine) -> None:
@@ -1355,19 +1448,14 @@ def _menu_test(engine: ArchiveEngine) -> None:
     password_supported = _menu_password_supported(archive)
     while True:
         choice = _select_menu("Test archive integrity", [
-            ("p", (f"Password: {'set' if password is not None else 'none'}"
-                   if password_supported else "Password: unavailable for this format")),
+            ("p", _menu_password_label(password, password_supported, "format")),
             ("r", "Test archive"), ("b", "Back"),
         ], subtitle=str(archive))
         if choice is None or choice == "b":
             return
         if choice == "p":
-            if password_supported:
-                password = _menu_password(password)
-            else:
-                _clear_screen()
-                print("  This format does not support passwords in Snug.")
-                _wait_for_enter()
+            password = _menu_edit_password(password, password_supported,
+                                           "This format does not support passwords in Snug.")
         elif choice == "r":
             break
     _clear_screen()
@@ -1381,7 +1469,7 @@ def _menu_list(engine: ArchiveEngine) -> None:
     archive = _select_archive()
     if archive is None:
         _clear_screen()
-        print("\n  Cancelled.")
+        print(_CANCELLED_MESSAGE)
         return
 
     _clear_screen()
@@ -1396,7 +1484,7 @@ def _menu_info(engine: ArchiveEngine) -> None:
     archive = _select_archive()
     if archive is None:
         _clear_screen()
-        print("\n  Cancelled.")
+        print(_CANCELLED_MESSAGE)
         return
 
     _clear_screen()
@@ -1788,10 +1876,43 @@ def _diagnostic_json(path: Path) -> dict:
         return {"status": "corrupt", "message": _safe(exc)}
 
 
-def _diagnostic_inventory(directory: Path, *, hashes: bool) -> dict:
-    import hashlib
+def _diagnostic_inventory_name(name: object) -> bool:
+    if not isinstance(name, str) or not name:
+        return False
+    if "\\" in name or "\x00" in name or name.startswith("/"):
+        return False
+    return not any(part in ("", ".", "..") or ":" in part for part in name.split("/"))
+
+
+def _diagnostic_digest(value: object) -> bool:
     import re
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value) is not None
+
+
+def _diagnostic_checksum(path: Path) -> str:
+    import hashlib
+    checksum = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            checksum.update(chunk)
+    return checksum.hexdigest()
+
+
+def _diagnostic_inventory_member(directory: Path, root: Path, name, expected, hashes: bool) -> dict | None:
     from pathlib import PurePosixPath
+    if not _diagnostic_inventory_name(name) or not _diagnostic_digest(expected):
+        return {"status": "corrupt", "message": "invalid inventory member"}
+    candidate = directory.joinpath(*PurePosixPath(name).parts)
+    if not candidate.resolve().is_relative_to(root):
+        return {"status": "corrupt", "message": "inventory member escapes its directory"}
+    if not candidate.is_file():
+        return {"status": "broken", "message": "recorded file is missing"}
+    if hashes and _diagnostic_checksum(candidate) != expected.lower():
+        return {"status": "broken", "message": "recorded file checksum mismatch"}
+    return None
+
+
+def _diagnostic_inventory(directory: Path, *, hashes: bool) -> dict:
     if not directory.exists():
         return {"status": "missing", "verification": "sha256" if hashes else "presence"}
     record = _diagnostic_json(directory / ".snug-files.json")
@@ -1806,23 +1927,9 @@ def _diagnostic_inventory(directory: Path, *, hashes: bool) -> dict:
         if not (directory / ".snug-files.json").resolve().is_relative_to(root):
             return {**result, "status": "corrupt", "message": "inventory escapes its directory"}
         for name, expected in files.items():
-            if (not isinstance(name, str) or not name or "\\" in name or "\x00" in name
-                    or name.startswith("/") or any(part in ("", ".", "..") or ":" in part
-                                                  for part in name.split("/"))
-                    or not isinstance(expected, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected)):
-                return {**result, "status": "corrupt", "message": "invalid inventory member"}
-            candidate = directory.joinpath(*PurePosixPath(name).parts)
-            if not candidate.resolve().is_relative_to(root):
-                return {**result, "status": "corrupt", "message": "inventory member escapes its directory"}
-            if not candidate.is_file():
-                return {**result, "status": "broken", "message": "recorded file is missing"}
-            if hashes:
-                checksum = hashlib.sha256()
-                with candidate.open("rb") as source:
-                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                        checksum.update(chunk)
-                if checksum.hexdigest() != expected.lower():
-                    return {**result, "status": "broken", "message": "recorded file checksum mismatch"}
+            error = _diagnostic_inventory_member(directory, root, name, expected, hashes)
+            if error is not None:
+                return {**result, **error}
     except (OSError, ValueError) as exc:
         return {**result, "status": "broken", "message": _safe(exc)}
     return {**result, "files": len(files)}
@@ -1857,145 +1964,216 @@ def _diagnostic_registration(ffi, kind: str, name: str) -> bool:
             getattr(ffi, free)(handle)
 
 
-def _diagnostic_backends(backends=None) -> list[dict]:
+def _diagnostic_aes_available() -> bool:
     import importlib
-    import importlib.metadata
+    try:
+        importlib.import_module("Cryptodome.Cipher.AES").new(bytes(32), 1)
+        return True
+    except Exception:
+        return False
+
+
+def _diagnostic_py7zr(backend) -> dict:
+    import importlib
     import re
+    library = getattr(backend, "_library")()
+    version = str(getattr(library, "__version__", "unknown"))
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:$|[.a-zA-Z+-])", version)
+    supported = bool(match and (1, 1, 3) <= tuple(map(int, match.groups())) < (2,))
+    api = callable(getattr(library, "SevenZipFile", None)) and callable(getattr(library, "is_7zfile", None))
+    writer = hasattr(importlib.import_module("py7zr.io"), "WriterFactory")
+    aes = _diagnostic_aes_available()
+    result = {"version": version, "compatible": supported,
+              "required_api": api and writer, "aes": aes,
+              "available": supported and api and writer and aes}
+    if not result["available"]:
+        result.update(status="broken", message="py7zr version, streaming API, or AES support is unusable")
+    return result
+
+
+def _diagnostic_native_capabilities(ffi, kind: str, names) -> list[str]:
+    candidates = {str(value) for value in names}
+    if kind == "reader":
+        candidates.add("rar5")
+    return [name for name in sorted(candidates) if _diagnostic_registration(ffi, kind, name)]
+
+
+def _diagnostic_libarchive(backend) -> dict:
+    import importlib.metadata
+    library = getattr(backend, "_library")()
+    ffi = library.ffi
+    native = int(ffi.version_number())
+    # Binding sets establish candidates, not successful native registrations.
+    readers = _diagnostic_native_capabilities(ffi, "reader", ffi.READ_FORMATS)
+    writers = _diagnostic_native_capabilities(ffi, "writer", ffi.WRITE_FORMATS)
+    filters = _diagnostic_native_capabilities(ffi, "filter", getattr(ffi, "READ_FILTERS", ()))
+    api = callable(getattr(library, "file_reader", None)) and callable(getattr(library, "file_writer", None))
+    try:
+        binding = importlib.metadata.version("libarchive-c")
+    except importlib.metadata.PackageNotFoundError:
+        binding = str(getattr(library, "__version__", "unknown"))
+    required_readers = {"7zip", "ar", "cab", "cpio", "iso9660", "lha", "rar", "xar", "warc", "zip"}
+    managed = native >= 3008000 and required_readers <= set(readers) and {"ar_bsd", "cpio_newc"} <= set(writers)
+    result = {"binding_version": binding, "native_version": native,
+              "native_version_string": f"{native // 1000000}.{native // 1000 % 1000}.{native % 1000}",
+              "required_api": api, "managed_compatible": managed,
+              "native_readers": readers, "native_writers": writers,
+              "native_filters": filters, "available": api}
+    if not api:
+        result.update(status="broken", message="libarchive streaming API is unusable")
+    return result
+
+
+def _diagnostic_writable_formats(backend, component: dict) -> list[str]:
+    return sorted(fmt.value for fmt in backend.write_formats if backend.can_write(fmt)
+                  and (backend.name != "libarchive"
+                       or getattr(backend, "_write_names", {}).get(fmt) in component["native_writers"]))
+
+
+def _diagnostic_backend(backend) -> dict:
+    component = {"name": str(backend.name), "status": "ok", "available": False,
+                 "read_formats": sorted(fmt.value for fmt in backend.read_formats),
+                 "write_formats": sorted(fmt.value for fmt in backend.write_formats)}
+    try:
+        if not backend.available():
+            component.update(status="unavailable", message=f"{backend.name} unavailable")
+        elif backend.name == "py7zr":
+            component.update(_diagnostic_py7zr(backend))
+        elif backend.name == "libarchive":
+            component.update(_diagnostic_libarchive(backend))
+        else:
+            component["available"] = True
+        if component["available"]:
+            component["write_formats"] = _diagnostic_writable_formats(backend, component)
+    except Exception as exc:
+        component.update(status="broken", available=False, message=_safe(exc))
+    return component
+
+
+def _diagnostic_backends(backends=None) -> list[dict]:
     from snug_core import _backends
-    result = []
     library_override = os.environ.get("LIBARCHIVE")
     try:
-        for backend in list(backends) if backends is not None else _backends():
-            component = {"name": str(backend.name), "status": "ok", "available": False,
-                         "read_formats": sorted(fmt.value for fmt in backend.read_formats),
-                         "write_formats": sorted(fmt.value for fmt in backend.write_formats)}
-            try:
-                if not backend.available():
-                    component.update(status="unavailable", message=f"{backend.name} unavailable")
-                elif backend.name == "py7zr":
-                    library = getattr(backend, "_library")()
-                    version = str(getattr(library, "__version__", "unknown"))
-                    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:$|[.a-zA-Z+-])", version)
-                    supported = bool(match and (1, 1, 3) <= tuple(map(int, match.groups())) < (2,))
-                    api = callable(getattr(library, "SevenZipFile", None)) and callable(getattr(library, "is_7zfile", None))
-                    writer = hasattr(importlib.import_module("py7zr.io"), "WriterFactory")
-                    aes = False
-                    try:
-                        importlib.import_module("Cryptodome.Cipher.AES").new(bytes(32), 1)
-                        aes = True
-                    except Exception:
-                        pass
-                    component.update(version=version, compatible=supported,
-                                     required_api=api and writer, aes=aes,
-                                     available=supported and api and writer and aes)
-                    if not component["available"]:
-                        component.update(status="broken", message="py7zr version, streaming API, or AES support is unusable")
-                elif backend.name == "libarchive":
-                    library = getattr(backend, "_library")()
-                    ffi = library.ffi
-                    native = int(ffi.version_number())
-                    # Binding sets establish candidate symbols, not whether
-                    # their native registrations succeed in this library build.
-                    readers = sorted(name for name in sorted({*(str(value) for value in ffi.READ_FORMATS), "rar5"})
-                                     if _diagnostic_registration(ffi, "reader", name))
-                    writers = sorted(name for name in sorted({str(value) for value in ffi.WRITE_FORMATS})
-                                     if _diagnostic_registration(ffi, "writer", name))
-                    filters = sorted(name for name in sorted({str(value) for value in getattr(ffi, "READ_FILTERS", ())})
-                                     if _diagnostic_registration(ffi, "filter", name))
-                    api = callable(getattr(library, "file_reader", None)) and callable(getattr(library, "file_writer", None))
-                    try:
-                        binding = importlib.metadata.version("libarchive-c")
-                    except importlib.metadata.PackageNotFoundError:
-                        binding = str(getattr(library, "__version__", "unknown"))
-                    required_readers = {"7zip", "ar", "cab", "cpio", "iso9660", "lha", "rar", "xar", "warc", "zip"}
-                    managed = native >= 3008000 and required_readers <= set(readers) and {"ar_bsd", "cpio_newc"} <= set(writers)
-                    component.update(binding_version=binding, native_version=native,
-                                     native_version_string=f"{native // 1000000}.{native // 1000 % 1000}.{native % 1000}",
-                                     required_api=api, managed_compatible=managed,
-                                     native_readers=readers, native_writers=writers,
-                                     native_filters=filters, available=api)
-                    if not api:
-                        component.update(status="broken", message="libarchive streaming API is unusable")
-                else:
-                    component["available"] = True
-                if component["available"]:
-                    component["write_formats"] = sorted(fmt.value for fmt in backend.write_formats if backend.can_write(fmt)
-                        and (backend.name != "libarchive" or getattr(backend, "_write_names", {}).get(fmt) in component["native_writers"]))
-            except Exception as exc:
-                component.update(status="broken", available=False, message=_safe(exc))
-            result.append(component)
+        available = list(backends) if backends is not None else _backends()
+        return [_diagnostic_backend(backend) for backend in available]
     finally:
         if library_override is None:
             os.environ.pop("LIBARCHIVE", None)
         else:
             os.environ["LIBARCHIVE"] = library_override
-    return result
+
+
+def _diagnostic_can_read(component: dict, fmt: ArchiveFormat) -> bool:
+    if component["name"] != "libarchive":
+        return True
+    # Reader-name aliases, not a separate archive capability matrix.
+    aliases = {"7z": "7zip", "iso": "iso9660", "zipx": "zip", "lzh": "lha", "deb": "ar", "rpm": "cpio"}
+    if aliases.get(fmt.value, fmt.value) not in component["native_readers"]:
+        return False
+    return fmt.value != "rpm" or "rpm" in component["native_filters"]
+
+
+def _diagnostic_format_support(component: dict, fmt: ArchiveFormat) -> tuple[bool, bool, str | None]:
+    declares_read = fmt.value in component["read_formats"]
+    declares_write = fmt.value in component["write_formats"]
+    if not (declares_read or declares_write):
+        return False, False, None
+    if not component["available"]:
+        return False, False, f"{component['name']} {component['status']}"
+    readable = declares_read and _diagnostic_can_read(component, fmt)
+    message = None
+    if declares_read and not readable:
+        message = f"{component['name']} reader unavailable"
+    return readable, declares_write, message
+
+
+def _diagnostic_format_status(readers: list[str], writers: list[str]) -> str:
+    if readers and writers:
+        return "read/write"
+    if readers:
+        return "read only"
+    if writers:
+        return "write only"
+    return "unavailable"
+
+
+def _diagnostic_format_row(fmt: ArchiveFormat, components: list[dict]) -> dict:
+    readers, writers, unavailable = [], [], []
+    for component in components:
+        readable, writable, message = _diagnostic_format_support(component, fmt)
+        if readable:
+            readers.append(component["name"])
+        if writable:
+            writers.append(component["name"])
+        if message is not None:
+            unavailable.append(message)
+    if fmt.value == "zipx" and "native" in readers:
+        unavailable.append("native ZIPX reading supports only this Python's ZIP codecs; other methods require libarchive")
+    return {"format": fmt.value, "read": bool(readers), "write": bool(writers),
+            "read_backends": readers, "write_backends": writers,
+            "status": _diagnostic_format_status(readers, writers), "details": unavailable}
 
 
 def _formats_report(backends=None) -> dict:
     components = _diagnostic_backends(backends)
-    rows = []
-    # These are reader-name aliases, not a separate archive capability matrix.
-    aliases = {"7z": "7zip", "iso": "iso9660", "zipx": "zip", "lzh": "lha", "deb": "ar", "rpm": "cpio"}
-    for fmt in ArchiveFormat:
-        readers, writers, unavailable = [], [], []
-        for component in components:
-            declares_read = fmt.value in component["read_formats"]
-            declares_write = fmt.value in component["write_formats"]
-            if not (declares_read or declares_write):
-                continue
-            if not component["available"]:
-                unavailable.append(f"{component['name']} {component['status']}")
-                continue
-            readable = declares_read
-            if component["name"] == "libarchive":
-                name = aliases.get(fmt.value, fmt.value)
-                readable = readable and name in component["native_readers"]
-                if fmt.value == "rpm":
-                    readable = readable and "rpm" in component["native_filters"]
-            if readable:
-                readers.append(component["name"])
-            elif declares_read:
-                unavailable.append(f"{component['name']} reader unavailable")
-            if declares_write:
-                writers.append(component["name"])
-        status = "read/write" if readers and writers else "read only" if readers else "write only" if writers else "unavailable"
-        if fmt.value == "zipx" and "native" in readers:
-            unavailable.append("native ZIPX reading supports only this Python's ZIP codecs; other methods require libarchive")
-        rows.append({"format": fmt.value, "read": bool(readers), "write": bool(writers),
-                     "read_backends": readers, "write_backends": writers, "status": status,
-                     "details": unavailable})
+    rows = [_diagnostic_format_row(fmt, components) for fmt in ArchiveFormat]
     return {"schema_version": 1, "formats": rows,
             "note": "Capabilities describe installed backends and registered readers; individual codecs, encryption, and archive variants can still be unsupported."}
 
 
-def _doctor_report(root: Path | None = None, backends=None) -> dict:
-    import platform
-    import re
-    root = Path(__file__).resolve().parent if root is None else Path(root).resolve()
-    state = _diagnostic_json(root / "runtime.json")
+def _diagnostic_runtime_lock(root: Path) -> dict:
     lock = _diagnostic_json(root / "runtime-lock.json")
-    marker = _diagnostic_json(root / ".snug-install.json")
-    if lock["status"] == "ok":
-        binding = lock["data"].get("binding", {})
-        if (type(lock["data"].get("schema")) is not int or lock["data"].get("schema") != 1
-                or not isinstance(binding, dict) or not isinstance(binding.get("filename"), str)
-                or not binding.get("filename") or not isinstance(binding.get("url"), str)
-                or not binding.get("url", "").startswith("https://")
-                or not isinstance(binding.get("sha256"), str)
-                or not re.fullmatch(r"[0-9a-fA-F]{64}", binding.get("sha256", ""))):
-            lock = {"status": "corrupt", "message": "invalid runtime lock schema"}
-    marker_data = marker.get("data", {})
-    state_data = state.get("data", {})
-    if state["status"] == "ok" and state_data.get("kind") not in ("homebrew", "windows"):
-        state = {"status": "corrupt", "message": "invalid runtime state kind"}
-    source = any((parent / ".git").exists() for parent in (root, *root.parents))
-    pip = bool(list(root.glob("*.dist-info")) or list(root.glob("*.egg-info")))
+    if lock["status"] != "ok":
+        return lock
+    schema = lock["data"].get("schema")
+    binding = lock["data"].get("binding", {})
+    if type(schema) is not int or schema != 1 or not _diagnostic_binding_valid(binding):
+        return {"status": "corrupt", "message": "invalid runtime lock schema"}
+    return lock
+
+
+def _diagnostic_binding_valid(binding) -> bool:
+    if not isinstance(binding, dict):
+        return False
+    filename, url = binding.get("filename"), binding.get("url")
+    return (isinstance(filename, str) and bool(filename)
+            and isinstance(url, str) and url.startswith("https://")
+            and _diagnostic_digest(binding.get("sha256")))
+
+
+def _diagnostic_runtime_state(root: Path) -> dict:
+    state = _diagnostic_json(root / "runtime.json")
+    if state["status"] == "ok" and state["data"].get("kind") not in ("homebrew", "windows"):
+        return {"status": "corrupt", "message": "invalid runtime state kind"}
+    return state
+
+
+def _diagnostic_managed_root(root: Path) -> bool:
     configured = os.environ.get("SNUG_MANAGED_ROOT")
     try:
-        identified = bool(configured and Path(configured).resolve() == root)
+        return bool(configured and Path(configured).resolve() == root)
     except (OSError, ValueError):
-        identified = False
+        return False
+
+
+def _diagnostic_installation_kind(source: bool, pip: bool, windows: bool, homebrew: bool) -> str:
+    if source:
+        return "source"
+    if pip:
+        return "pip"
+    if windows:
+        return "windows"
+    if homebrew:
+        return "homebrew"
+    return "external"
+
+
+def _diagnostic_installation(root: Path, state: dict, marker: dict) -> dict:
+    marker_data = marker.get("data", {})
+    state_data = state.get("data", {})
+    source = any((parent / ".git").exists() for parent in (root, *root.parents))
+    pip = bool(list(root.glob("*.dist-info")) or list(root.glob("*.egg-info")))
+    identified = _diagnostic_managed_root(root)
     homebrew = (type(marker_data.get("schema")) is int and marker_data.get("schema") == 1
                 and marker_data.get("kind") == "homebrew" and marker_data.get("branch") == "main"
                 and not (root / ".snug-install.json").is_symlink())
@@ -2003,34 +2181,81 @@ def _doctor_report(root: Path | None = None, backends=None) -> dict:
                or ((root / "runtime.ps1").is_file() and (root / "runtime.json").exists())
                or (identified and sys.platform == "win32"))
     managed = not (source or pip) and (identified or windows)
-    kind = "source" if source else "pip" if pip else "windows" if windows else "homebrew" if homebrew else "external"
     updater_owned = managed and homebrew and sys.platform != "win32"
-    integrity = {name: _diagnostic_inventory(root / name, hashes=name == "vendor")
-                 for name in ("vendor", "packages", "native")}
-    components = _diagnostic_backends(backends)
+    return {"managed": managed, "windows": windows, "updater_owned": updater_owned,
+            "kind": _diagnostic_installation_kind(source, pip, windows, homebrew)}
+
+
+def _diagnostic_backend_health(components: list[dict], managed: bool) -> bool:
     healthy = sys.version_info >= (3, 10)
     for component in components:
         required = managed or component["name"] in ("native", "native-stream")
         component["required"] = required
         if required and (not component["available"] or (component["name"] == "libarchive" and not component.get("managed_compatible", True))):
             healthy = False
-    if managed:
-        if lock["status"] != "ok" or integrity["vendor"]["status"] != "ok":
+    return healthy
+
+
+def _diagnostic_runtime_health(root: Path, installation: dict, state: dict, lock: dict, integrity: dict) -> bool:
+    if not installation["managed"]:
+        return True
+    healthy = lock["status"] == "ok" and integrity["vendor"]["status"] == "ok"
+    if installation["windows"] and (state["status"] != "ok" or state.get("data", {}).get("kind") != "windows"):
+        healthy = False
+    for name in ("packages", "native"):
+        if (root / name).exists() and integrity[name]["status"] != "ok":
             healthy = False
-        if windows and (state["status"] != "ok" or state_data.get("kind") != "windows"):
-            healthy = False
-        for name in ("packages", "native"):
-            if (root / name).exists() and integrity[name]["status"] != "ok":
-                healthy = False
+    return healthy
+
+
+def _doctor_report(root: Path | None = None, backends=None) -> dict:
+    import platform
+    root = Path(__file__).resolve().parent if root is None else Path(root).resolve()
+    state = _diagnostic_runtime_state(root)
+    lock = _diagnostic_runtime_lock(root)
+    marker = _diagnostic_json(root / ".snug-install.json")
+    installation = _diagnostic_installation(root, state, marker)
+    integrity = {name: _diagnostic_inventory(root / name, hashes=name == "vendor")
+                 for name in ("vendor", "packages", "native")}
+    components = _diagnostic_backends(backends)
+    backend_health = _diagnostic_backend_health(components, installation["managed"])
+    runtime_health = _diagnostic_runtime_health(root, installation, state, lock, integrity)
+    updater_owned = installation["updater_owned"]
     for description in (state, lock, marker):
         description.pop("data", None)
-    return {"schema_version": 1, "ok": healthy, "snug_version": __version__,
+    return {"schema_version": 1, "ok": backend_health and runtime_health, "snug_version": __version__,
             "python": {"version": platform.python_version(), "executable": sys.executable, "supported": sys.version_info >= (3, 10)},
             "platform": {"system": platform.system(), "architecture": platform.machine()},
             "backends": components,
-            "runtime": {"managed": managed, "kind": kind, "state": state, "lock": lock, "integrity": integrity},
+            "runtime": {"managed": installation["managed"], "kind": installation["kind"],
+                        "state": state, "lock": lock, "integrity": integrity},
             "updater": {"ownership": "managed" if updater_owned else "external", "marker": marker,
                         "reason": "installer-owned main Homebrew installation" if updater_owned else "update using the original installation method"}}
+
+
+def _print_doctor_backend(component: dict) -> None:
+    requirement = "required" if component["required"] else "optional"
+    detail = component.get("message", component.get("version", component.get("native_version_string", "")))
+    print(f"{_safe(component['name'])}: {component['status']} ({requirement}) {_safe(detail)}".rstrip())
+    if component["name"] == "py7zr" and "required_api" in component:
+        print(f"  required API: {component['required_api']}; AES: {component['aes']}")
+    if component["name"] == "libarchive" and "native_readers" in component:
+        print(f"  binding: {_safe(component['binding_version'])}; managed-compatible: {component['managed_compatible']}")
+        print(f"  readers: {_safe(', '.join(component['native_readers']))}")
+        print(f"  writers: {_safe(', '.join(component['native_writers']))}")
+
+
+def _print_doctor_report(report: dict) -> None:
+    print(f"Snug {report['snug_version']}  Python {report['python']['version']}")
+    print(f"Platform: {_safe(report['platform']['system'])} {_safe(report['platform']['architecture'])}")
+    for component in report["backends"]:
+        _print_doctor_backend(component)
+    runtime = report["runtime"]
+    print(f"Runtime: {runtime['kind']}; state: {runtime['state']['status']}; lock: {runtime['lock']['status']}")
+    for name, inventory in runtime["integrity"].items():
+        print(f"  {name}: {inventory['status']} ({inventory['verification']})")
+    print(f"Updater installation: {report['updater']['ownership']}")
+    print("Required components are healthy." if report["ok"] else "Required components need attention.")
 
 
 def _cmd_doctor(args) -> int:
@@ -2039,25 +2264,16 @@ def _cmd_doctor(args) -> int:
     if args.json:
         print(json.dumps(report, sort_keys=True, ensure_ascii=True))
     else:
-        print(f"Snug {report['snug_version']}  Python {report['python']['version']}")
-        print(f"Platform: {_safe(report['platform']['system'])} {_safe(report['platform']['architecture'])}")
-        for component in report["backends"]:
-            requirement = "required" if component["required"] else "optional"
-            detail = component.get("message", component.get("version", component.get("native_version_string", "")))
-            print(f"{_safe(component['name'])}: {component['status']} ({requirement}) {_safe(detail)}".rstrip())
-            if component["name"] == "py7zr" and "required_api" in component:
-                print(f"  required API: {component['required_api']}; AES: {component['aes']}")
-            if component["name"] == "libarchive" and "native_readers" in component:
-                print(f"  binding: {_safe(component['binding_version'])}; managed-compatible: {component['managed_compatible']}")
-                print(f"  readers: {_safe(', '.join(component['native_readers']))}")
-                print(f"  writers: {_safe(', '.join(component['native_writers']))}")
-        runtime = report["runtime"]
-        print(f"Runtime: {runtime['kind']}; state: {runtime['state']['status']}; lock: {runtime['lock']['status']}")
-        for name, inventory in runtime["integrity"].items():
-            print(f"  {name}: {inventory['status']} ({inventory['verification']})")
-        print(f"Updater installation: {report['updater']['ownership']}")
-        print("Required components are healthy." if report["ok"] else "Required components need attention.")
+        _print_doctor_report(report)
     return 0 if report["ok"] else 2
+
+
+def _print_format_row(row: dict) -> None:
+    names = list(dict.fromkeys([*row["read_backends"], *row["write_backends"]]))
+    status = ", ".join(names) if names else "; ".join(row["details"]) or "unavailable"
+    if names and row["details"]:
+        status += "; " + "; ".join(row["details"])
+    print(f"{row['format']:<9} {'yes' if row['read'] else 'no':<5} {'yes' if row['write'] else 'no':<5} {_safe(status)}")
 
 
 def _cmd_formats(args) -> int:
@@ -2068,11 +2284,7 @@ def _cmd_formats(args) -> int:
     else:
         print(f"{'Format':<9} {'Read':<5} {'Write':<5} Backend / status")
         for row in report["formats"]:
-            names = list(dict.fromkeys([*row["read_backends"], *row["write_backends"]]))
-            status = ", ".join(names) if names else "; ".join(row["details"]) or "unavailable"
-            if names and row["details"]:
-                status += "; " + "; ".join(row["details"])
-            print(f"{row['format']:<9} {'yes' if row['read'] else 'no':<5} {'yes' if row['write'] else 'no':<5} {_safe(status)}")
+            _print_format_row(row)
         print(report["note"])
     return 0
 
@@ -2097,7 +2309,7 @@ def _cmd_update(args) -> int:
         print(f"error: {_safe(exc)}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
-        print("\ninterrupted", file=sys.stderr)
+        print(_INTERRUPTED_MESSAGE, file=sys.stderr)
         return 130
     return 0
 
@@ -2122,29 +2334,27 @@ def _update_notice(handle: AutomaticCheck | None) -> None:
         return
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    argv = list(sys.argv[1:]) if argv is None else list(argv)
+def _run_interactive_cli() -> int:
+    handle = _start_update_check() if sys.stdin.isatty() and sys.stdout.isatty() else None
+    code = _launch_interactive()
+    if code == 0:
+        _update_notice(handle)
+    return code
 
-    if not argv:
-        handle = _start_update_check() if sys.stdin.isatty() and sys.stdout.isatty() else None
-        code = _launch_interactive()
-        if code == 0:
-            _update_notice(handle)
-        return code
 
-    args = _build_parser().parse_args(argv)
-    if args.command == "update":
-        return _cmd_update(args)
-    if args.command in {"doctor", "formats"}:
-        try:
-            return _cmd_doctor(args) if args.command == "doctor" else _cmd_formats(args)
-        except (ArchiveError, OSError, ValueError) as exc:
-            print(f"error: {_safe(exc)}", file=sys.stderr)
-            return 2
-        except KeyboardInterrupt:
-            print("\ninterrupted", file=sys.stderr)
-            return 130
+def _run_diagnostic_command(args) -> int:
+    dispatch = {"doctor": _cmd_doctor, "formats": _cmd_formats}
+    try:
+        return dispatch[args.command](args)
+    except (ArchiveError, OSError, ValueError) as exc:
+        print(f"error: {_safe(exc)}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print(_INTERRUPTED_MESSAGE, file=sys.stderr)
+        return 130
 
+
+def _run_archive_command(args) -> int:
     handle = _start_update_check()
     engine = ArchiveEngine()
 
@@ -2172,12 +2382,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {_safe(exc)}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
-        print("\ninterrupted", file=sys.stderr)
+        print(_INTERRUPTED_MESSAGE, file=sys.stderr)
         return 130
 
     if args.command in {"create", "extract"} and not args.quiet:
         _update_notice(handle)
     return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:]) if argv is None else list(argv)
+    if not argv:
+        return _run_interactive_cli()
+    args = _build_parser().parse_args(argv)
+    if args.command == "update":
+        return _cmd_update(args)
+    if args.command in {"doctor", "formats"}:
+        return _run_diagnostic_command(args)
+    return _run_archive_command(args)
 
 
 if __name__ == "__main__":

@@ -556,7 +556,8 @@ def test_failures_before_replacement_preserve_current(managed_install, tmp_path,
     assert_preserved(managed_install)
 
 
-@pytest.mark.parametrize("failure", ["old-rename", "new-rename", "post-startup", "interrupt", "post-interrupt", "old-interrupt-after-rename"])
+@pytest.mark.parametrize("failure", ["old-rename", "new-rename", "post-startup", "interrupt", "post-interrupt",
+                                    "old-interrupt-after-rename", "exit", "post-exit", "old-exit-after-rename"])
 def test_commit_failure_restores_previous_install(managed_install, tmp_path, monkeypatch, failure):
     root = managed_install
     archive = tmp_path / "release.tar.gz"
@@ -568,34 +569,47 @@ def test_commit_failure_restores_previous_install(managed_install, tmp_path, mon
         source, target = Path(source), Path(target)
         if failure == "old-rename" and source == root:
             raise OSError("old rename failed")
-        if failure == "old-interrupt-after-rename" and source == root:
+        if failure in ("old-interrupt-after-rename", "old-exit-after-rename") and source == root:
             original_replace(source, target)
+            if failure == "old-exit-after-rename":
+                raise SystemExit(7)
             raise KeyboardInterrupt()
-        if failure in ("new-rename", "interrupt") and source.name == "staged" and target == root:
+        if failure in ("new-rename", "interrupt", "exit") and source.name == "staged" and target == root:
+            if failure == "exit":
+                raise SystemExit(7)
             if failure == "interrupt":
                 raise KeyboardInterrupt()
             raise OSError("new rename failed")
         return original_replace(source, target)
 
     monkeypatch.setattr(update.os, "replace", replace)
-    if failure in ("post-startup", "post-interrupt"):
+    if failure in ("post-startup", "post-interrupt", "post-exit"):
         original_validate = update._validate
 
         def validate(path, version):
             if path == root:
+                if failure == "post-exit":
+                    raise SystemExit(7)
                 if failure == "post-interrupt":
                     raise KeyboardInterrupt()
                 raise update.UpdateError("postreplacement startup failed")
             original_validate(path, version)
 
         monkeypatch.setattr(update, "_validate", validate)
-    with pytest.raises(KeyboardInterrupt if "interrupt" in failure else update.UpdateError):
+    expected_error = update.UpdateError
+    if "exit" in failure:
+        expected_error = SystemExit
+    elif "interrupt" in failure:
+        expected_error = KeyboardInterrupt
+    with pytest.raises(expected_error) as caught:
         update.perform_update(CURRENT)
+    if "exit" in failure:
+        assert caught.value.code == 7
     assert_preserved(root)
 
 
-@pytest.mark.parametrize("interrupt", [False, True])
-def test_rollback_failure_retains_only_working_backup(managed_install, tmp_path, monkeypatch, interrupt):
+@pytest.mark.parametrize("rollback_error", [PermissionError, KeyboardInterrupt, SystemExit])
+def test_rollback_failure_retains_only_working_backup(managed_install, tmp_path, monkeypatch, capsys, rollback_error):
     root = managed_install
     archive = tmp_path / "release.tar.gz"
     make_sdist(archive)
@@ -605,9 +619,7 @@ def test_rollback_failure_retains_only_working_backup(managed_install, tmp_path,
 
     def replace(source, target):
         if Path(source).name == "previous":
-            if interrupt:
-                raise KeyboardInterrupt()
-            raise PermissionError("rollback rename failed")
+            raise rollback_error("rollback rename failed")
         return original_replace(source, target)
 
     def validate(path, version):
@@ -617,13 +629,20 @@ def test_rollback_failure_retains_only_working_backup(managed_install, tmp_path,
 
     monkeypatch.setattr(update.os, "replace", replace)
     monkeypatch.setattr(update, "_validate", validate)
-    with pytest.raises(update.UpdateError, match="previous installation is preserved at") as caught:
+    expected_error = update.UpdateError if rollback_error is PermissionError else rollback_error
+    with pytest.raises(expected_error) as caught:
         update.perform_update(CURRENT)
     work = list(root.parent.glob(f".{root.name}.update-*"))
     assert len(work) == 1
     backup = work[0] / "previous"
     assert (backup / "snug.py").read_text() == "old snug.py\n"
-    assert str(backup) in str(caught.value)
+    if rollback_error is PermissionError:
+        message = str(caught.value)
+    else:
+        message = capsys.readouterr().err
+    assert "previous installation is preserved at" in message
+    assert str(backup) in message
+    assert "Restore that directory to the original installation path before retrying" in message
     assert not (root.parent / f".{root.name}.update-lock").exists()
 
 

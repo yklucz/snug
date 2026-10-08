@@ -62,6 +62,9 @@ def _error_text(exc: Exception, password: str | None = None) -> str:
     return "".join(c if c.isprintable() else repr(c)[1:-1] for c in message)
 
 
+_SEVEN_ZIP_PASSWORD_MESSAGE = "7z archive requires a password; use --password or --password-file"
+
+
 class LibarchiveBackend:
     """Broad, streaming extraction through the libarchive-c ctypes binding."""
 
@@ -276,19 +279,22 @@ class LibarchiveBackend:
                     if not _selected(entry.name, ctx.members):
                         continue
                     ctx.progress.item(entry.name)
-                    if raw.isdir or raw.issym:
-                        _extract_entry(ctx, entry)
-                    elif raw.islnk:
-                        _extract_entry(ctx, entry, hardlink=entry.link_target)
-                    elif raw.isreg:
-                        _extract_entry(ctx, entry, chunks=self._entry_chunks(
-                            raw, raw.size, trim_padding=metadata.get("format") == "warc"))
-                    else:
-                        ctx.report.skipped.append(entry.name)
+                    self._extract_member(raw, entry, ctx, trim_padding=metadata.get("format") == "warc")
         except ArchiveError:
             raise
         except Exception as exc:
             self._raise_read_error(path, exc, password)
+
+    def _extract_member(self, raw, entry: ArchiveEntry, ctx: _ExtractContext,
+                        *, trim_padding: bool) -> None:
+        if raw.isdir or raw.issym:
+            _extract_entry(ctx, entry)
+        elif raw.islnk:
+            _extract_entry(ctx, entry, hardlink=entry.link_target)
+        elif raw.isreg:
+            _extract_entry(ctx, entry, chunks=self._entry_chunks(raw, raw.size, trim_padding=trim_padding))
+        else:
+            ctx.report.skipped.append(entry.name)
 
     @staticmethod
     def _entry_chunks(raw, size: int | None, *, trim_padding: bool = False) -> Iterable[bytes]:
@@ -512,7 +518,7 @@ class _SevenZipWriters:
     def finish(self):
         for entry, target, product in self.products.values():
             if isinstance(product, _DiskWriter):
-                self._finish_file(entry, target, product)
+                self._finish_file(entry, product)
         # Symlinks are deferred until all data writers are closed, so
         # concurrent decompression cannot follow an archive's new link.
         for entry, target, product in self.products.values():
@@ -524,7 +530,7 @@ class _SevenZipWriters:
                 linked_entry = cast(ArchiveEntry, replace(entry, link_target=link_target))
                 _extract_entry(self.ctx, linked_entry)
 
-    def _finish_file(self, entry: ArchiveEntry, target: Path, product: _DiskWriter) -> None:
+    def _finish_file(self, entry: ArchiveEntry, product: _DiskWriter) -> None:
         if entry.size_known and product.length != entry.size:
             raise ArchiveError(f"truncated 7z member: {entry.name!r}")
         product.close()
@@ -561,7 +567,8 @@ class _IntegrityWriter:
         return len(data)
 
     def read(self, size: int | None = None) -> bytes:
-        return b""
+        # Honor py7zr's read(size) interface without retaining decoded payload.
+        return io.BytesIO().read(-1 if size is None else size)
 
     def seek(self, offset: int, whence: int = 0) -> int:
         if offset != 0 or whence != 0:
@@ -569,6 +576,7 @@ class _IntegrityWriter:
         return 0
 
     def flush(self) -> None:
+        # Integrity bytes are counted immediately; there is no output buffer.
         pass
 
     def close(self) -> None:
@@ -651,7 +659,7 @@ class SevenZipBackend:
             raise exc
         message = _error_text(exc, password)
         if exc.__class__.__name__ == "PasswordRequired":
-            raise ArchiveError("7z archive requires a password; use --password or --password-file") from exc
+            raise ArchiveError(_SEVEN_ZIP_PASSWORD_MESSAGE) from exc
         if password is not None and exc.__class__.__name__ in ("CrcError", "Bad7zFile", "LZMAError"):
             raise ArchiveError("could not read 7z archive: incorrect password or corrupt archive") from exc
         if password is not None and isinstance(exc, TypeError) and "Unknown field" in message:
@@ -680,14 +688,8 @@ class SevenZipBackend:
         try:
             with path.open("rb") as source, library.SevenZipFile(source, "r", password=password) as archive:
                 if archive.needs_password() and password is None:
-                    raise ArchiveError("7z archive requires a password; use --password or --password-file")
-                entries = self._entries(archive)
-                _validate_structure(entries)
-                for raw, entry in zip(archive.files, entries):
-                    if getattr(raw, "is_junction", False):
-                        raise ArchiveError(f"7z junction integrity testing is unsupported: {entry.name!r}")
-                    if entry.is_dir or entry.is_special:
-                        progress.item(entry.name)
+                    raise ArchiveError(_SEVEN_ZIP_PASSWORD_MESSAGE)
+                entries = self._test_entries(archive, progress)
                 payload = [entry for entry in entries if not (entry.is_dir or entry.is_special or entry.is_hardlink)]
                 factory = self._test_factory(library, payload, progress)
                 if payload:
@@ -702,6 +704,16 @@ class SevenZipBackend:
                     message = f"member {name!r}: {_error_text(error, password)}"
                     raise ArchiveError(_error_text(ArchiveError(message), password)) from exc
                 raise
+
+    def _test_entries(self, archive, progress: ProgressSink) -> list[ArchiveEntry]:
+        entries = self._entries(archive)
+        _validate_structure(entries)
+        for raw, entry in zip(archive.files, entries):
+            if getattr(raw, "is_junction", False):
+                raise ArchiveError(f"7z junction integrity testing is unsupported: {entry.name!r}")
+            if entry.is_dir or entry.is_special:
+                progress.item(entry.name)
+        return entries
 
     @staticmethod
     def _test_factory(library, entries: list[ArchiveEntry], progress: ProgressSink):
@@ -790,7 +802,7 @@ class SevenZipBackend:
             # workers, which could outlive an interrupted join and cleanup.
             with path.open("rb") as source, library.SevenZipFile(source, "r", password=password) as archive:
                 if archive.needs_password() and password is None:
-                    raise ArchiveError("7z archive requires a password; use --password or --password-file")
+                    raise ArchiveError(_SEVEN_ZIP_PASSWORD_MESSAGE)
                 entries = self._entries(archive)
                 selected = self._validate_entries(archive, entries, ctx)
                 ctx.progress.start(sum(e.size for e in selected if not e.is_dir and not e.is_symlink), len(selected))

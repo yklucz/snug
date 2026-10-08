@@ -92,6 +92,44 @@ def test_cleanup_failure_attempts_all_outputs_and_preserves_primary(
     assert not list((tmp_path / "output").iterdir())
 
 
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt(), SystemExit(7)])
+@pytest.mark.parametrize("decoder_failure", [False, True])
+def test_cleanup_interruption_propagates_after_all_outputs_are_attempted(
+    tmp_path, monkeypatch, interruption, decoder_failure,
+):
+    archive = tmp_path / "multiple.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr("first.txt", b"first complete member")
+        handle.writestr("second.txt", b"second complete member")
+    backend = core.NativeBackend()
+    extraction = backend.extract
+    abort = core.SafeOutputFile.abort
+    attempted = []
+
+    def extract(path, ctx, password=None):
+        extraction(path, ctx, password=password)
+        if decoder_failure:
+            raise core.ArchiveError("injected decoder failure")
+
+    def interrupt_first_cleanup(output):
+        attempted.append(output.entry.name)
+        abort(output)
+        if len(attempted) == 1:
+            raise interruption
+
+    monkeypatch.setattr(backend, "extract", extract)
+    monkeypatch.setattr(core.SafeOutputFile, "abort", interrupt_first_cleanup)
+    engine = core.ArchiveEngine([backend])
+    root = tmp_path / "output"
+    with pytest.raises(type(interruption)) as caught:
+        engine.extract(archive, root)
+    assert caught.value is interruption
+    assert attempted == ["first.txt", "second.txt"]
+    assert_no_temporary_files(root)
+    if decoder_failure:
+        assert not list(root.iterdir())
+
+
 def test_cleanup_only_failure_is_reported_after_all_attempts(engine, tmp_path, monkeypatch):
     archive = tmp_path / "multiple.zip"
     with zipfile.ZipFile(archive, "w") as handle:

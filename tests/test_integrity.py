@@ -179,6 +179,30 @@ def test_integrity_native_zip_uses_bounded_reads(native_engine, tmp_path, monkey
     assert len(sizes) >= 3
 
 
+@pytest.mark.parametrize("suffix", sorted(STREAM_FORMATS))
+@pytest.mark.parametrize("operation", ["test", "extract"])
+def test_stream_payload_is_decoded_once_without_a_preflight_pass(tmp_path, monkeypatch, suffix, operation):
+    archive = archive_fixture(tmp_path, suffix)
+    backend = core.StreamBackend()
+    open_stream = backend._open
+    reads = []
+
+    def counted_open(path, fmt, mode, level=None):
+        if "r" in mode:
+            reads.append(path)
+        return open_stream(path, fmt, mode, level)
+
+    monkeypatch.setattr(backend, "_open", counted_open)
+    engine = core.ArchiveEngine([backend])
+    if operation == "test":
+        assert engine.test(archive).bytes_read == len(PAYLOAD)
+    else:
+        root = tmp_path / "output"
+        assert engine.extract(archive, root).bytes_written == len(PAYLOAD)
+        assert (root / "payload.txt").read_bytes() == PAYLOAD
+    assert reads == [archive]
+
+
 def test_integrity_inspects_native_archive_once(tmp_path, monkeypatch):
     archive = archive_fixture(tmp_path, "zip", payload=b"content")
     backend = core.NativeBackend()

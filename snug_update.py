@@ -48,6 +48,7 @@ INSTALL_MARKER = ".snug-install.json"
 OWNED_FILES = ("snug.py", "snug_core.py", "snug_ext.py", "snug_update.py",
                "snug_runtime.py", "runtime.sh", "runtime-lock.json")
 _STATE_MUTEX = threading.Lock()
+_INVALID_VERSION_MESSAGE = "invalid semantic version"
 _VERSION = re.compile(
     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
@@ -72,13 +73,13 @@ class Version:
     @classmethod
     def parse(cls, text: str) -> Version:
         if not isinstance(text, str) or len(text) > 128:
-            raise UpdateError("invalid semantic version")
+            raise UpdateError(_INVALID_VERSION_MESSAGE)
         match = _VERSION.fullmatch(text)
         if not match:
-            raise UpdateError("invalid semantic version")
+            raise UpdateError(_INVALID_VERSION_MESSAGE)
         prerelease = tuple(match[4].split(".")) if match[4] else ()
         if any(part.isdigit() and len(part) > 1 and part[0] == "0" for part in prerelease):
-            raise UpdateError("invalid semantic version")
+            raise UpdateError(_INVALID_VERSION_MESSAGE)
         return cls(int(match[1]), int(match[2]), int(match[3]), prerelease)
 
     def __eq__(self, other: object) -> bool:
@@ -311,9 +312,9 @@ def _fetch_release() -> dict[str, Any]:
                 chunks.append(chunk)
         raw = b"".join(chunks)
         release = json.loads(raw)
-    except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+    except (OSError, http.client.HTTPException) as exc:
         raise _network_error(exc) from None
-    except (ValueError, UnicodeError, RecursionError):
+    except (ValueError, RecursionError):
         raise UpdateError("GitHub returned invalid release JSON") from None
     if not isinstance(release, dict) or not isinstance(release.get("tag_name"), str):
         raise UpdateError("GitHub returned unexpected release metadata")
@@ -370,7 +371,7 @@ def start_automatic_check(current_version: str) -> AutomaticCheck | None:
 
         threading.Thread(target=worker, name="snug-update-check", daemon=True).start()
         return handle
-    except (OSError, UpdateError, RuntimeError):
+    except (OSError, RuntimeError):
         return None
 
 
@@ -461,12 +462,43 @@ def _download(url: str, digest: str, size: int, destination: Path) -> None:
                     raise UpdateError("release download exceeds the expected size")
                 checksum.update(chunk)
                 output.write(chunk)
-    except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+    except (OSError, http.client.HTTPException) as exc:
         raise _network_error(exc) from None
     if count != size:
         raise UpdateError("release download is incomplete")
     if checksum.hexdigest() != digest:
         raise UpdateError("release download checksum mismatch")
+
+
+def _release_member_parts(member: tarfile.TarInfo, root: str, seen: set[str]) -> list[str]:
+    name = member.name.rstrip("/") if member.isdir() else member.name
+    parts = name.split("/")
+    if (not name or "\\" in name or any(not part or part in (".", "..")
+            or ":" in part or "\x00" in part for part in parts)
+            or parts[0] != root or len(name) > 1024):
+        raise UpdateError("release archive contains an unsafe path")
+    key = name.casefold()
+    if key in seen:
+        raise UpdateError("release archive contains duplicate paths")
+    seen.add(key)
+    if not (member.isfile() or member.isdir()) or (len(parts) == 1 and not member.isdir()):
+        raise UpdateError("release archive contains a link or unsupported member")
+    if member.size < 0 or member.size > DOWNLOAD_LIMIT:
+        raise UpdateError("release archive member exceeds the size limit")
+    return parts
+
+
+def _read_release_application_file(source: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
+    if not member.isfile() or member.size > CODE_LIMIT:
+        raise UpdateError("release application files must be bounded regular files")
+    content = source.extractfile(member)
+    if content is None:
+        raise UpdateError("release application file is unreadable")
+    with content:
+        data = content.read(CODE_LIMIT + 1)
+    if len(data) != member.size:
+        raise UpdateError("release application file is incomplete")
+    return data
 
 
 def _release_files(archive: Path, version: str) -> dict[str, bytes]:
@@ -486,35 +518,13 @@ def _release_files(archive: Path, version: str) -> dict[str, bytes]:
             for index, member in enumerate(source):
                 if index >= 2048:
                     raise UpdateError("release archive contains too many members")
-                name = member.name.rstrip("/") if member.isdir() else member.name
-                parts = name.split("/")
-                if (not name or "\\" in name or any(not part or part in (".", "..")
-                        or ":" in part or "\x00" in part for part in parts)
-                        or parts[0] != root or len(name) > 1024):
-                    raise UpdateError("release archive contains an unsafe path")
-                key = name.casefold()
-                if key in seen:
-                    raise UpdateError("release archive contains duplicate paths")
-                seen.add(key)
-                if not (member.isfile() or member.isdir()) or (len(parts) == 1 and not member.isdir()):
-                    raise UpdateError("release archive contains a link or unsupported member")
-                if member.size < 0 or member.size > DOWNLOAD_LIMIT:
-                    raise UpdateError("release archive member exceeds the size limit")
+                parts = _release_member_parts(member, root, seen)
                 total += member.size
                 if total > UNPACKED_LIMIT:
                     raise UpdateError("release archive exceeds the unpacked size limit")
                 if len(parts) != 2 or parts[1] not in OWNED_FILES:
                     continue
-                if not member.isfile() or member.size > CODE_LIMIT:
-                    raise UpdateError("release application files must be bounded regular files")
-                content = source.extractfile(member)
-                if content is None:
-                    raise UpdateError("release application file is unreadable")
-                with content:
-                    data = content.read(CODE_LIMIT + 1)
-                if len(data) != member.size:
-                    raise UpdateError("release application file is incomplete")
-                files[parts[1]] = data
+                files[parts[1]] = _read_release_application_file(source, member)
     except (tarfile.TarError, OSError, EOFError, zlib.error):
         raise UpdateError("release archive is invalid or unreadable") from None
     if set(files) != set(OWNED_FILES):
@@ -562,6 +572,46 @@ def _validate(root: Path, version: str) -> None:
         raise UpdateError("new Snug installation could not complete offline validation") from None
 
 
+@dataclass
+class _UpdateWorkspace:
+    directory: Path
+    keep_backup: bool = False
+
+
+def _restore_previous_installation(root: Path, staged: Path, backup: Path) -> None:
+    try:
+        if root.exists():
+            os.replace(root, staged)
+        os.replace(backup, root)
+    except (OSError, KeyboardInterrupt, SystemExit) as exc:
+        failure = UpdateError(f"update rollback could not finish; the previous installation is preserved at {backup}. "
+                              "Restore that directory to the original installation path before retrying")
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            print(failure, file=sys.stderr)
+            raise
+        raise failure from None
+
+
+def _replace_installation(root: Path, staged: Path, work: _UpdateWorkspace, version: str) -> None:
+    backup = work.directory / "previous"
+    moved = False
+    work.keep_backup = True  # An interruption must never delete a moved installation.
+    try:
+        os.replace(root, backup)
+        moved = True
+        os.replace(staged, root)
+        _validate(root, version)
+    except BaseException as exc:
+        if moved or backup.exists():
+            _restore_previous_installation(root, staged, backup)
+        work.keep_backup = False
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        reason = str(exc) if isinstance(exc, UpdateError) else "installation replacement failed"
+        raise UpdateError(f"{reason}; the previous Snug installation was preserved") from None
+    work.keep_backup = False
+
+
 def perform_update(current_version: str) -> str:
     root = _managed_root()  # Refuse external installations before network access.
     lock = root.parent / f".{root.name}.update-lock"
@@ -571,52 +621,28 @@ def perform_update(current_version: str) -> str:
         raise UpdateError("Another Snug update is in progress; try again when it finishes") from None
     except OSError:
         raise UpdateError("Snug's installation directory is not writable") from None
-    work: Path | None = None
-    keep_backup = False
+    work: _UpdateWorkspace | None = None
     try:
         result = check_update(current_version)
         if not result.available:
             return f"Snug {current_version} is up to date."
         url, digest, size = _release_asset(result)
-        work = Path(tempfile.mkdtemp(prefix=f".{root.name}.update-", dir=root.parent))
-        archive = work / "release.tar.gz"
+        work = _UpdateWorkspace(Path(tempfile.mkdtemp(prefix=f".{root.name}.update-", dir=root.parent)))
+        archive = work.directory / "release.tar.gz"
         _download(url, digest, size, archive)
         files = _release_files(archive, result.latest_version)
-        staged = work / "staged"
+        staged = work.directory / "staged"
         _stage(root, staged, files, result.latest_version)
         _validate(staged, result.latest_version)
         if (root / ".repair-lock").exists():
             raise UpdateError("A Snug dependency repair is in progress; try updating again when it finishes")
-        backup = work / "previous"
-        moved = False
-        keep_backup = True  # An interruption must never delete a moved installation.
-        try:
-            os.replace(root, backup)
-            moved = True
-            os.replace(staged, root)
-            _validate(root, result.latest_version)
-        except BaseException as exc:
-            if moved or backup.exists():
-                try:
-                    if root.exists():
-                        os.replace(root, staged)
-                    os.replace(backup, root)
-                except BaseException:
-                    keep_backup = True
-                    raise UpdateError(f"update rollback could not finish; the previous installation is preserved at {backup}. "
-                                      "Restore that directory to the original installation path before retrying") from None
-            keep_backup = False
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                raise
-            reason = str(exc) if isinstance(exc, UpdateError) else "installation replacement failed"
-            raise UpdateError(f"{reason}; the previous Snug installation was preserved") from None
-        keep_backup = False
+        _replace_installation(root, staged, work, result.latest_version)
         return f"Updated Snug from {current_version} to {result.latest_version}."
     except OSError:
         raise UpdateError("unable to stage the update; the previous Snug installation was preserved") from None
     finally:
-        if work is not None and not keep_backup:
-            shutil.rmtree(work, ignore_errors=True)
+        if work is not None and not work.keep_backup:
+            shutil.rmtree(work.directory, ignore_errors=True)
         try:
             lock.rmdir()
         except OSError:

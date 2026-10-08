@@ -56,7 +56,16 @@ jobs:
           "$RUNNER_TEMP/snug-wheel/bin/python" -m pip install --no-deps dist/*.whl
           cd "$RUNNER_TEMP"
           "$RUNNER_TEMP/snug-wheel/bin/snug" --version
+          "$RUNNER_TEMP/snug-wheel/bin/python" -I "$GITHUB_WORKSPACE/scripts/check_installed_cli.py"
           "$RUNNER_TEMP/snug-wheel/bin/snug" create smoke.zip "$GITHUB_WORKSPACE/tests"
           "$RUNNER_TEMP/snug-wheel/bin/snug" list smoke.zip
           "$RUNNER_TEMP/snug-wheel/bin/snug" info smoke.zip
           "$RUNNER_TEMP/snug-wheel/bin/snug" extract smoke.zip -C smoke-output
+      - name: Verify a fresh editable installation outside the checkout
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14'
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/snug-editable"
+          "$RUNNER_TEMP/snug-editable/bin/python" -m pip install --no-deps -e "$GITHUB_WORKSPACE"
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/snug-editable/bin/python" -I "$GITHUB_WORKSPACE/scripts/check_installed_cli.py"
