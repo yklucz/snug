@@ -53,6 +53,10 @@ class _CancelPrompt(Exception):
     """Return from one line prompt without changing its caller's value."""
 
 
+class _TerminalEOF(KeyboardInterrupt):
+    """Distinguish raw-reader EOF while preserving screen interruption rules."""
+
+
 # =========================================================================== #
 #  Interactive TUI helpers
 # =========================================================================== #
@@ -192,6 +196,10 @@ def _raw_mode(*, when: int | None = None):
         yield old
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        if sys.platform == "darwin" and not old[3] & termios.PENDIN:
+            # Settle macOS raw -> canonical PENDIN without reading input.
+            import select
+            select.select([fd], [], [], 0)
 
 
 # -- key reader ------------------------------------------------------------- #
@@ -287,7 +295,7 @@ def _read_key_unix() -> str:
     fd = sys.stdin.fileno()
     b = _read_unix_byte(fd)
     if not b:
-        raise KeyboardInterrupt
+        raise _TerminalEOF
     if b == b"\x03":
         raise KeyboardInterrupt
     if b == b"\t":
@@ -321,7 +329,7 @@ def _read_arrow_sequence(fd: int) -> str:
             return "other"
         b = _read_unix_byte(fd)
         if not b:
-            raise KeyboardInterrupt
+            raise _TerminalEOF
         if b == b"\x03":
             raise KeyboardInterrupt
         if 0x40 <= b[0] <= 0x7E:
@@ -1315,23 +1323,14 @@ def _prompt_signals():
 
 @contextmanager
 def _prompt_raw_mode():
-    """Preserve queued input and settle macOS's pending canonicalization."""
+    """Enter prompt raw mode without flushing queued input."""
     if os.name == "nt":
         with _raw_mode():
             yield
         return
     import termios
-    entered = False
-    try:
-        with _raw_mode(when=termios.TCSANOW) as saved:
-            entered = True
-            yield
-    finally:
-        if entered and sys.platform == "darwin" and not saved[3] & termios.PENDIN:
-            # macOS sets PENDIN on raw -> canonical. A readiness poll processes
-            # that pending input without reading or discarding any bytes.
-            import select
-            select.select([sys.stdin.fileno()], [], [], 0)
+    with _raw_mode(when=termios.TCSANOW):
+        yield
 
 
 _PROMPT_HISTORY: dict[str, list[str]] = {}
@@ -1353,7 +1352,7 @@ def _edit_line(label: str, initial_text: str, context: Sequence[str], history_ke
                     else:
                         visible, cursor = _editor_view(editor, cols - 3)
                         lines = list(context[:max(0, rows - 3)]) + [label, "> " + visible]
-                        _draw_lines(lines, footer=["Enter: submit · Esc: cancel"], size=size)
+                        _draw_lines(lines, footer=["Enter: submit · Esc/Ctrl+C: cancel"], size=size)
                         sys.stdout.write(_cursor_at(len(lines), 3 + cursor, size=size) + _SHOW_CURSOR)
                     sys.stdout.flush()
                     drawn_size = size
@@ -1389,17 +1388,22 @@ def _prompt(prompt: str, default: str = "", *, preserve_spaces: bool = False,
             history_key: str | None = None) -> str:
     """Prompt for a line of input, returning *default* on a blank entry."""
     suffix = f" [{_safe(default)}]" if default else ""
+    tty = sys.stdin.isatty() and sys.stdout.isatty()
     sys.stdout.write(_SHOW_CURSOR)
     sys.stdout.flush()
     try:
-        if sys.stdin.isatty() and sys.stdout.isatty():
+        if tty:
             response = _edit_line(f"  {_safe(prompt)}{suffix}:", initial_text, context,
                                   history_key if history_key is not None else prompt)
         else:
             response = input(f"  {_safe(prompt)}{suffix}: ")
     except EOFError as exc:
         raise _QuitInteractive() from exc
+    except _TerminalEOF as exc:
+        raise _QuitInteractive() from exc
     except KeyboardInterrupt as exc:
+        if tty:
+            raise _CancelPrompt() from exc
         print()
         raise _QuitInteractive() from exc
     finally:
@@ -1966,7 +1970,7 @@ class _LimitsScreen(_MenuScreen):
     def _refresh_options(self) -> None:
         self.options = [(key, f"{label}: {_menu_limit_label(self.values[field])}")
                         for key, label, field in self._FIELDS]
-        self.options.append(("b", "Use these limits"))
+        self.options.extend((("a", "Apply limits"), ("b", "Back (discard edits)")))
 
     def draw(self, cols: int, rows: int) -> list[str]:
         if self.editing is None:
@@ -1998,10 +2002,10 @@ class _LimitsScreen(_MenuScreen):
                 "  " + _paint("Apply on the limits screen keeps edits", _C.DIM),
             ]
         if self._mode == "compact":
-            return [_paint("Tab/b Apply · Esc Discards edits", _C.DIM)]
+            return [_paint("Tab Apply · b/Esc/q/Q Discard edits", _C.DIM)]
         return [
             "  " + _paint("↑↓ move · Enter activates · e/s/f/r edit", _C.DIM),
-            "  " + _paint("Tab / b Apply · Esc / q discard edits", _C.DIM),
+            "  " + _paint("Tab / a Apply · b / Esc / q / Q discard edits", _C.DIM),
         ]
 
     def _handle_field(self, key: str) -> None:
@@ -2037,15 +2041,15 @@ class _LimitsScreen(_MenuScreen):
         if self.editing is not None:
             self._handle_field(key)
             return None
-        if key in ("esc", "quit", "q", "Q"):
+        choice = self.options[self.selected][0] if key == "enter" else key
+        if choice in ("b", "esc", "quit", "q", "Q"):
             self.values = {field: getattr(self._original, field) for _, _, field in self._FIELDS}
             self.limits_result = self._original
             self._refresh_options()
             return _EXIT
         if key in ("up", "down"):
             return super().handle(key)
-        choice = self.options[self.selected][0] if key == "enter" else key
-        if choice in ("b", "confirm"):
+        if choice in ("a", "confirm"):
             self.limits_result = ExtractionLimits(**self.values)
             return _EXIT
         if any(shortcut == choice for shortcut, _, _ in self._FIELDS):

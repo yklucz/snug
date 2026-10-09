@@ -33,7 +33,7 @@ def _edit(screen, key, text):
     assert screen.editing is None
 
 
-@pytest.mark.parametrize("cancel", ["esc", "q", "Q", "quit"])
+@pytest.mark.parametrize("cancel", ["b", "esc", "q", "Q", "quit"])
 def test_escape_and_leave_keys_discard_every_tentative_limit(cancel):
     original = snug.ExtractionLimits(3, 4000, 2000, 8)
     screen = snug._LimitsScreen(original)
@@ -48,7 +48,7 @@ def test_escape_and_leave_keys_discard_every_tentative_limit(cancel):
     assert original == snug.ExtractionLimits(3, 4000, 2000, 8)
 
 
-@pytest.mark.parametrize("apply", ["b", "confirm", "enter"])
+@pytest.mark.parametrize("apply", ["a", "confirm", "enter"])
 def test_only_explicit_apply_keeps_all_edited_values(apply):
     original = snug.ExtractionLimits(3, 4000, 2000, 8)
     screen = snug._LimitsScreen(original)
@@ -177,7 +177,7 @@ def test_field_backspace_and_space_preserve_existing_stripped_input_behavior():
     assert screen.buffer == " 12 "
     assert screen.handle("enter") is None
     assert screen.values["max_entries"] == 12
-    assert screen.handle("b") is snug._EXIT
+    assert screen.handle("confirm") is snug._EXIT
     assert screen.limits_result == snug.ExtractionLimits(max_entries=12)
 
 
@@ -267,7 +267,7 @@ def test_reopening_limits_rollback_preserves_prior_apply_and_next_operation_defa
         if len(screens) == 1:
             assert screen.limits_result == snug.ExtractionLimits()
             _edit(screen, "e", "2")
-            assert screen.handle("b") is snug._EXIT
+            assert screen.handle("confirm") is snug._EXIT
         else:
             assert screen.limits_result == snug.ExtractionLimits(max_entries=2)
             _edit(screen, "e", "0")
@@ -383,7 +383,8 @@ def test_limits_fields_errors_and_discard_footer_fit_layout(monkeypatch, size, s
     assert "Esc" in visible and "discard" in visible.lower()
     if state == "overview":
         assert "Tab" in visible and "Apply" in visible
-        assert "Use these limits" in visible and "Selected entries: 3" in visible
+        assert "Apply limits" in visible and "Selected entries: 3" in visible
+        assert "Back (discard edits)" in visible
     else:
         assert "Enter" in visible and "Current: 3" in visible
         assert "field" in visible

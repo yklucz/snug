@@ -332,6 +332,7 @@ def test_blank_manual_path_cancels_without_engine_calls(monkeypatch, tmp_path, q
 @pytest.mark.skipif(os.name != "posix", reason="Unix termios restoration")
 @pytest.mark.parametrize("error", [None, RuntimeError, KeyboardInterrupt], ids=["normal", "exception", "interrupt"])
 def test_raw_mode_restores_saved_settings(monkeypatch, error):
+    import select
     termios = pytest.importorskip("termios")
     tty = pytest.importorskip("tty")
     fd = 12345
@@ -342,6 +343,9 @@ def test_raw_mode_restores_saved_settings(monkeypatch, error):
     monkeypatch.setattr(termios, "tcgetattr", lambda actual_fd: saved if actual_fd == fd else pytest.fail("wrong input fd"))
     monkeypatch.setattr(tty, "setraw", lambda actual_fd: events.append(("raw", actual_fd)))
     monkeypatch.setattr(termios, "tcsetattr", lambda actual_fd, when, settings: events.append(("restore", actual_fd, deepcopy(settings))))
+    # macOS settles restored canonical input with a readiness poll, without
+    # consuming bytes; this fixture's descriptor is deliberately synthetic.
+    monkeypatch.setattr(select, "select", lambda readers, writers, errors, timeout: ([], [], []))
 
     def exercise():
         with snug._raw_mode():

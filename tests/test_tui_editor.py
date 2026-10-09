@@ -436,11 +436,12 @@ def test_escape_discards_prompt_text_and_does_not_record_history_or_quit(tty_pro
     assert not snug._PROMPT_HISTORY.get("Value")
 
 
-@pytest.mark.parametrize("event", ["ctrl_d", KeyboardInterrupt()])
-def test_tty_eof_and_ctrl_c_keep_existing_quit_contract(tty_prompt, event):
+@pytest.mark.parametrize("event,exception", [("ctrl_d", snug._QuitInteractive),
+                                           (KeyboardInterrupt(), snug._CancelPrompt)])
+def test_tty_eof_quits_and_ctrl_c_cancels_only_prompt(tty_prompt, event, exception):
     tty_prompt([event])
 
-    with pytest.raises(snug._QuitInteractive) as raised:
+    with pytest.raises(exception) as raised:
         snug._prompt("Value")
 
     assert isinstance(raised.value.__cause__, (EOFError, KeyboardInterrupt))
@@ -464,7 +465,7 @@ def test_prompt_restores_raw_mode_and_signal_context_on_exception(
     monkeypatch.setattr(snug, "_raw_mode", lambda: restore("raw"))
     monkeypatch.setattr(snug, "_prompt_raw_mode", lambda: restore("raw"))
     monkeypatch.setattr(snug, "_prompt_signals", lambda: restore("signals"))
-    expected = snug._QuitInteractive if isinstance(failure, KeyboardInterrupt) else RuntimeError
+    expected = snug._CancelPrompt if isinstance(failure, KeyboardInterrupt) else RuntimeError
 
     with pytest.raises(expected):
         snug._prompt("Value")
@@ -475,7 +476,7 @@ def test_prompt_restores_raw_mode_and_signal_context_on_exception(
 
 @pytest.mark.parametrize("event,exception", [
     ("enter", None), ("esc", "_CancelPrompt"), ("ctrl_d", "_QuitInteractive"),
-    (KeyboardInterrupt(), "_QuitInteractive"), (RuntimeError("injected"), "RuntimeError"),
+    (KeyboardInterrupt(), "_CancelPrompt"), (RuntimeError("injected"), "RuntimeError"),
 ])
 @pytest.mark.parametrize("pending_input", [False, True])
 def test_prompt_restores_all_saved_termios_settings_on_every_exit(
@@ -565,7 +566,7 @@ def test_prompt_signal_restores_raw_mode_before_dispatching_previous_handler(
 
 
 @pytest.mark.parametrize("signal_name", ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"])
-def test_default_prompt_signal_terminates_after_restoring_raw_and_handlers(
+def test_default_prompt_signal_interrupts_after_restoring_raw_and_handlers(
         tty_prompt, monkeypatch, signal_name):
     tty_prompt([])
     signum = getattr(snug.signal, signal_name)
@@ -588,7 +589,7 @@ def test_default_prompt_signal_terminates_after_restoring_raw_and_handlers(
 
     monkeypatch.setattr(snug, "_prompt_raw_mode", raw)
     monkeypatch.setattr(snug, "_read_key_timeout", interrupt)
-    expected = snug._QuitInteractive if signal_name == "SIGINT" else SystemExit
+    expected = snug._CancelPrompt if signal_name == "SIGINT" else SystemExit
 
     with pytest.raises(expected) as raised:
         snug._prompt("Value")
