@@ -1150,13 +1150,13 @@ def _interactive_enumerate(sources, *, root, symlinks, archive_real):
 #  Interactive menu actions
 # =========================================================================== #
 
-def _prompt(prompt: str, default: str = "") -> str:
+def _prompt(prompt: str, default: str = "", *, preserve_spaces: bool = False) -> str:
     """Prompt for a line of input, returning *default* on a blank entry."""
     suffix = f" [{_safe(default)}]" if default else ""
     sys.stdout.write(_SHOW_CURSOR)
     sys.stdout.flush()
     try:
-        response = input(f"  {_safe(prompt)}{suffix}: ").strip()
+        response = input(f"  {_safe(prompt)}{suffix}: ")
     except EOFError as exc:
         raise _QuitInteractive() from exc
     except KeyboardInterrupt as exc:
@@ -1165,7 +1165,7 @@ def _prompt(prompt: str, default: str = "") -> str:
     finally:
         sys.stdout.write(_HIDE_CURSOR)
         sys.stdout.flush()
-    return response or default
+    return (response if preserve_spaces else response.strip()) or default
 
 
 def _ensure_archive_suffix(name: str) -> str:
@@ -1207,17 +1207,43 @@ def _build_archive_options(found: list[Path]) -> list[tuple[str, str]]:
     return options
 
 
+def _manual_path_error(raw: str) -> None:
+    """Leave bounded rejection context visible while the next line is read."""
+    tty = sys.stdin.isatty() and sys.stdout.isatty()
+    cols, rows = _term_size()
+    shown = _safe(raw)
+    if tty:
+        shown = _tui_truncate(shown, max(0, cols - 13))
+    lines = ["Not a file.", f'Rejected: "{shown}"']
+    leading = len(raw) - len(raw.lstrip(" "))
+    trailing = len(raw) - len(raw.rstrip(" "))
+    if leading or trailing:
+        lines.extend((f"Leading spaces: {leading}", f"Trailing spaces: {trailing}"))
+    stripped = raw.strip()
+    if stripped and stripped != raw and not Path(raw).exists() and Path(stripped).exists():
+        lines.append("Hint: the stripped path exists.")
+    lines.extend(("Rejected text is read-only.", "Enter another path; empty returns."))
+    if tty:
+        lines = lines[:max(0, rows - 2)]
+        _draw_lines(lines, size=(cols, rows))
+        sys.stdout.write(_cursor_at(min(len(lines) + 1, rows), size=(cols, rows)))
+        sys.stdout.flush()
+    else:
+        for line in lines:
+            print("  " + line)
+
+
 def _handle_manual_path() -> Path | None:
     _clear_screen()
     print()
-    raw = _prompt("Archive path")
-    if not raw:
-        return None
-    candidate = Path(raw)
-    if candidate.is_file():
-        return candidate
-    print(f"  Not a file: {_safe(str(candidate))}")
-    return None
+    while True:
+        raw = _prompt("Archive path", preserve_spaces=True)
+        if not raw:
+            return None
+        candidate = Path(raw)
+        if candidate.is_file():
+            return candidate
+        _manual_path_error(raw)
 
 
 def _select_archive() -> Path | None:

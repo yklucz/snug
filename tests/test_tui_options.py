@@ -34,7 +34,7 @@ def script_menus(monkeypatch, choices, *, password=None):
 
 def script_prompts(monkeypatch, responses):
     values = iter(responses)
-    monkeypatch.setattr(snug, "_prompt", lambda *args: next(values))
+    monkeypatch.setattr(snug, "_prompt", lambda *args, **kwargs: next(values))
 
 
 def choose_format(name):

@@ -324,7 +324,7 @@ def test_blank_manual_path_cancels_without_engine_calls(monkeypatch, tmp_path, q
 
     handler(engine)
 
-    prompt.assert_called_once_with("Archive path")
+    prompt.assert_called_once_with("Archive path", preserve_spaces=True)
     assert len(seen) == (2 if has_archive else 0)
     assert engine.mock_calls == []
 
