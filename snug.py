@@ -15,6 +15,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import sys
 import tarfile
 import threading
@@ -46,6 +47,10 @@ _INTERRUPTED_MESSAGE = "\ninterrupted"
 
 class _QuitInteractive(Exception):
     """The user chose to leave an interactive prompt."""
+
+
+class _CancelPrompt(Exception):
+    """Return from one line prompt without changing its caller's value."""
 
 
 # =========================================================================== #
@@ -164,7 +169,7 @@ def _fullscreen():
 
 
 @contextmanager
-def _raw_mode():
+def _raw_mode(*, when: int | None = None):
     """Put the terminal into raw (unbuffered, no-echo) mode."""
     if os.name == "nt":
         yield
@@ -180,8 +185,11 @@ def _raw_mode():
         raise RuntimeError("stdin is not a terminal") from exc
 
     try:
-        tty.setraw(fd)
-        yield
+        if when is None:
+            tty.setraw(fd)
+        else:
+            tty.setraw(fd, when)
+        yield old
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -190,7 +198,7 @@ def _raw_mode():
 
 def _read_key() -> str:
     """Return one of: up, down, left, right, enter, esc, space, backspace,
-    confirm (Unix Tab), quit, or a single printable character."""
+    home, end, delete, ctrl_a/e/d/k/u/w, confirm (Unix Tab), quit, or a character."""
     if os.name == "nt":
         return _read_key_windows()
     return _read_key_unix()
@@ -272,7 +280,7 @@ def _read_utf8_key(fd: int, lead: bytes) -> str:
             character = decoder.decode(continuation, final=index == length - 2)
     except UnicodeDecodeError:
         return "other"
-    return character if character.isprintable() else "other"
+    return character if character.isprintable() or character in ("\u200c", "\u200d") else "other"
 
 
 def _read_key_unix() -> str:
@@ -286,6 +294,12 @@ def _read_key_unix() -> str:
         return "confirm"
     if b == b"\x1b":
         return _read_arrow_sequence(fd)
+    controls = {
+        b"\x01": "ctrl_a", b"\x05": "ctrl_e", b"\x04": "ctrl_d",
+        b"\x0b": "ctrl_k", b"\x15": "ctrl_u", b"\x17": "ctrl_w",
+    }
+    if b in controls:
+        return controls[b]
     if b[0] >= 0x80:
         return _read_utf8_key(fd, b)
     return _decode_simple_char(b)
@@ -301,19 +315,28 @@ def _read_arrow_sequence(fd: int) -> str:
             _UNIX_KEY_PUSHBACK.appendleft(introducer)
         return "esc"
 
+    parameters = bytearray()
     while True:
         if not _unix_byte_ready(fd, 0.05):
             return "other"
         b = _read_unix_byte(fd)
         if not b:
             raise KeyboardInterrupt
+        if b == b"\x03":
+            raise KeyboardInterrupt
         if 0x40 <= b[0] <= 0x7E:
+            if b == b"~" and introducer == b"[":
+                return {b"1": "home", b"7": "home", b"4": "end", b"8": "end",
+                        b"3": "delete"}.get(bytes(parameters).split(b";")[0], "other")
             return {
                 b"A": "up",
                 b"B": "down",
                 b"C": "right",
                 b"D": "left",
+                b"H": "home",
+                b"F": "end",
             }.get(b, "other")
+        parameters.extend(b)
 
 
 def _decode_simple_char(b: bytes) -> str:
@@ -1150,13 +1173,230 @@ def _interactive_enumerate(sources, *, root, symlinks, archive_real):
 #  Interactive menu actions
 # =========================================================================== #
 
-def _prompt(prompt: str, default: str = "", *, preserve_spaces: bool = False) -> str:
+def _edit_boundaries(text: str) -> list[int]:
+    """Group each base with its following zero-cell marks for editing."""
+    return [0] + [index for index, char in enumerate(text)
+                  if index and _tui_char_width(char)] + ([len(text)] if text else [])
+
+
+@dataclass
+class _LineEditor:
+    """Pure line-editing state; indices refer to the original Unicode text."""
+
+    initial_text: str = ""
+    history: Sequence[str] = ()
+    buffer: str = field(init=False)
+    cursor: int = field(init=False)
+    history_position: int = field(init=False)
+    _draft: tuple[str, int] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.history = tuple(self.history)
+        self.buffer = self.initial_text
+        self.cursor = len(self.buffer)
+        self.history_position = len(self.history)
+        self._draft = (self.buffer, self.cursor)
+
+    def handle(self, key: str) -> str | None:
+        if key in ("enter", "esc"):
+            return "submit" if key == "enter" else "cancel"
+        if key == "ctrl_d" and not self.buffer:
+            return "eof"
+        boundaries = _edit_boundaries(self.buffer)
+        previous = max((pos for pos in boundaries if pos < self.cursor), default=0)
+        following = min((pos for pos in boundaries if pos > self.cursor), default=len(self.buffer))
+        if key in ("home", "ctrl_a"):
+            self.cursor = 0
+        elif key in ("end", "ctrl_e"):
+            self.cursor = len(self.buffer)
+        elif key == "left":
+            self.cursor = previous
+        elif key == "right":
+            self.cursor = following
+        elif key == "backspace":
+            self.buffer = self.buffer[:previous] + self.buffer[self.cursor:]
+            self.cursor = previous
+        elif key in ("delete", "ctrl_d"):
+            self.buffer = self.buffer[:self.cursor] + self.buffer[following:]
+        elif key == "ctrl_k":
+            self.buffer = self.buffer[:self.cursor]
+        elif key == "ctrl_u":
+            self.buffer = self.buffer[self.cursor:]
+            self.cursor = 0
+        elif key == "ctrl_w":
+            position = boundaries.index(self.cursor)
+            while position and self.buffer[boundaries[position - 1]:boundaries[position]].isspace():
+                position -= 1
+            while position and not self.buffer[boundaries[position - 1]:boundaries[position]].isspace():
+                position -= 1
+            start = boundaries[position]
+            self.buffer = self.buffer[:start] + self.buffer[self.cursor:]
+            self.cursor = start
+        elif key in ("up", "down"):
+            if key == "up" and self.history_position:
+                if self.history_position == len(self.history):
+                    self._draft = (self.buffer, self.cursor)
+                self.history_position -= 1
+                self.buffer = self.history[self.history_position]
+                self.cursor = len(self.buffer)
+            elif key == "down" and self.history_position < len(self.history):
+                self.history_position += 1
+                if self.history_position == len(self.history):
+                    self.buffer, self.cursor = self._draft
+                else:
+                    self.buffer = self.history[self.history_position]
+                    self.cursor = len(self.buffer)
+        else:
+            text = " " if key == "space" else key
+            if len(text) == 1 and (text.isprintable() or text in ("\u200c", "\u200d")):
+                self.buffer = self.buffer[:self.cursor] + text + self.buffer[self.cursor:]
+                target = self.cursor + 1
+                self.cursor = next(pos for pos in _edit_boundaries(self.buffer) if pos >= target)
+        return None
+
+
+def _editor_view(editor: _LineEditor, width: int) -> tuple[str, int]:
+    """Scroll whole editing units into view, reserving a cell for the cursor."""
+    budget = max(0, width - 1)
+    boundaries = _edit_boundaries(editor.buffer)
+    units = [_safe(editor.buffer[left:right]) for left, right in zip(boundaries, boundaries[1:])]
+    widths = [_tui_cell_width(unit) for unit in units]
+    start = boundaries.index(editor.cursor)
+    cursor_cells = 0
+    while start and cursor_cells + widths[start - 1] <= budget:
+        start -= 1
+        cursor_cells += widths[start]
+    end = start
+    cells = 0
+    while end < len(units) and cells + widths[end] <= budget:
+        cells += widths[end]
+        end += 1
+    return "".join(units[start:end]), cursor_cells
+
+
+@contextmanager
+def _prompt_signals():
+    """Unwind raw mode before catchable termination signals leave a prompt."""
+    saved = {}
+
+    class Interrupted(BaseException):
+        pass
+
+    def interrupt(signum, frame):
+        raise Interrupted(signum, frame)
+
+    interrupted = None
+    try:
+        try:
+            if threading.current_thread() is threading.main_thread():
+                for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"):
+                    signum = getattr(signal, name, None)
+                    if signum is not None:
+                        previous = signal.getsignal(signum)
+                        if previous != signal.SIG_IGN:
+                            saved[signum] = previous
+                            signal.signal(signum, interrupt)
+            yield
+        except Interrupted as exc:
+            interrupted = exc
+    finally:
+        for signum, previous in saved.items():
+            signal.signal(signum, previous)
+    if interrupted is not None:
+        signum, frame = interrupted.args
+        previous = saved[signum]
+        if callable(previous):
+            previous(signum, frame)
+            return
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        raise SystemExit(128 + signum)
+
+
+@contextmanager
+def _prompt_raw_mode():
+    """Preserve queued input and settle macOS's pending canonicalization."""
+    if os.name == "nt":
+        with _raw_mode():
+            yield
+        return
+    import termios
+    entered = False
+    try:
+        with _raw_mode(when=termios.TCSANOW) as saved:
+            entered = True
+            yield
+    finally:
+        if entered and sys.platform == "darwin" and not saved[3] & termios.PENDIN:
+            # macOS sets PENDIN on raw -> canonical. A readiness poll processes
+            # that pending input without reading or discarding any bytes.
+            import select
+            select.select([sys.stdin.fileno()], [], [], 0)
+
+
+_PROMPT_HISTORY: dict[str, list[str]] = {}
+
+
+def _edit_line(label: str, initial_text: str, context: Sequence[str], history_key: str) -> str:
+    editor = _LineEditor(initial_text, _PROMPT_HISTORY.get(history_key, ()))
+    drawn_size = None
+    redraw = True
+    while True:
+        with _prompt_signals(), _prompt_raw_mode():
+            while True:
+                size = _term_size()
+                cols, rows = size
+                if redraw or size != drawn_size:
+                    if _size_mode(*size) == "small":
+                        _draw_lines(_too_small_lines(), size=size)
+                        sys.stdout.write(_HIDE_CURSOR)
+                    else:
+                        visible, cursor = _editor_view(editor, cols - 3)
+                        lines = list(context[:max(0, rows - 3)]) + [label, "> " + visible]
+                        _draw_lines(lines, footer=["Enter: submit · Esc: cancel"], size=size)
+                        sys.stdout.write(_cursor_at(len(lines), 3 + cursor, size=size) + _SHOW_CURSOR)
+                    sys.stdout.flush()
+                    drawn_size = size
+                    redraw = False
+                key = _read_key_timeout(0.1)
+                if key is None:
+                    continue
+                # The shared reader pushes back a printable byte after ESC. Only
+                # a bare Escape cancels this editor; leave pending text intact.
+                if key == "esc" and _UNIX_KEY_PUSHBACK:
+                    key = "other"
+                if _size_mode(*_term_size()) == "small" and key not in ("esc", "ctrl_d"):
+                    continue
+                action = editor.handle(key)
+                if action == "cancel":
+                    raise _CancelPrompt()
+                if action == "eof":
+                    raise EOFError()
+                if action == "submit":
+                    if editor.buffer:
+                        history = _PROMPT_HISTORY.setdefault(history_key, [])
+                        if not history or history[-1] != editor.buffer:
+                            history.append(editor.buffer)
+                    return editor.buffer
+                redraw = True
+        # A previously installed signal handler may return normally. Resume
+        # editing the same buffer and cursor after it runs in restored mode.
+        redraw = True
+
+
+def _prompt(prompt: str, default: str = "", *, preserve_spaces: bool = False,
+            initial_text: str = "", context: Sequence[str] = (),
+            history_key: str | None = None) -> str:
     """Prompt for a line of input, returning *default* on a blank entry."""
     suffix = f" [{_safe(default)}]" if default else ""
     sys.stdout.write(_SHOW_CURSOR)
     sys.stdout.flush()
     try:
-        response = input(f"  {_safe(prompt)}{suffix}: ")
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            response = _edit_line(f"  {_safe(prompt)}{suffix}:", initial_text, context,
+                                  history_key if history_key is not None else prompt)
+        else:
+            response = input(f"  {_safe(prompt)}{suffix}: ")
     except EOFError as exc:
         raise _QuitInteractive() from exc
     except KeyboardInterrupt as exc:
@@ -1207,7 +1447,7 @@ def _build_archive_options(found: list[Path]) -> list[tuple[str, str]]:
     return options
 
 
-def _manual_path_error(raw: str) -> None:
+def _manual_path_error(raw: str) -> list[str]:
     """Leave bounded rejection context visible while the next line is read."""
     tty = sys.stdin.isatty() and sys.stdout.isatty()
     cols, rows = _term_size()
@@ -1231,19 +1471,30 @@ def _manual_path_error(raw: str) -> None:
     else:
         for line in lines:
             print("  " + line)
+    return lines
 
 
 def _handle_manual_path() -> Path | None:
     _clear_screen()
     print()
+    initial_text = ""
+    context: list[str] = []
     while True:
-        raw = _prompt("Archive path", preserve_spaces=True)
+        try:
+            if sys.stdin.isatty() and sys.stdout.isatty():
+                raw = _prompt("Archive path", preserve_spaces=True,
+                              initial_text=initial_text, context=context)
+            else:
+                raw = _prompt("Archive path", preserve_spaces=True)
+        except _CancelPrompt:
+            return None
         if not raw:
             return None
         candidate = Path(raw)
         if candidate.is_file():
             return candidate
-        _manual_path_error(raw)
+        context = _manual_path_error(raw)
+        initial_text = raw
 
 
 def _select_archive() -> Path | None:
@@ -1299,7 +1550,10 @@ def _menu_password(current: str | None) -> str | None:
         return _read_password(argparse.Namespace(password=True, password_file=None))
     if choice == "f":
         _clear_screen()
-        path = _prompt("Password file")
+        try:
+            path = _prompt("Password file")
+        except _CancelPrompt:
+            return current
         if path:
             return _read_password(argparse.Namespace(password=False, password_file=Path(path)))
     if choice == "n":
@@ -1333,14 +1587,25 @@ def _menu_format_path(path: Path, fmt: ArchiveFormat) -> Path:
 
 def _menu_compression(current: int | None) -> int | None:
     _clear_screen()
+    context: list[str] = []
     while True:
-        raw = _prompt("Compression level (0-9 or default)",
-                      "default" if current is None else str(current))
+        try:
+            tty = sys.stdin.isatty() and sys.stdout.isatty()
+            default = "default" if current is None else str(current)
+            if tty:
+                raw = _prompt("Compression level (0-9 or default)", default, context=context)
+            else:
+                raw = _prompt("Compression level (0-9 or default)", default)
+        except _CancelPrompt:
+            return current
         if raw.lower() == "default":
             return None
         if raw.isascii() and raw.isdecimal() and 0 <= int(raw) <= 9:
             return int(raw)
-        print("  Enter a compression level from 0 to 9, or default.")
+        message = "Enter a compression level from 0 to 9, or default."
+        context = [message]
+        if not tty:
+            print("  " + message)
 
 
 def _menu_compression_supported(fmt: ArchiveFormat) -> bool:
@@ -1415,7 +1680,10 @@ class _CreateOptions:
 
     def select_output(self) -> None:
         _clear_screen()
-        candidate = self.cwd / _prompt("Output archive", str(self.archive_path))
+        try:
+            candidate = self.cwd / _prompt("Output archive", str(self.archive_path))
+        except _CancelPrompt:
+            return
         if not candidate.name.lower().endswith(_ARCHIVE_SUFFIXES):
             self.archive_path = _menu_format_path(candidate, self.fmt)
             return
@@ -1472,7 +1740,11 @@ def _menu_confirm_overwrite(archive: Path) -> bool:
     if not archive.exists():
         return True
     _clear_screen()
-    answer = _prompt(f"{archive} exists. Overwrite? (y/N)", "n").lower()
+    try:
+        answer = _prompt(f"{archive} exists. Overwrite? (y/N)", "n",
+                         history_key="Overwrite confirmation").lower()
+    except _CancelPrompt:
+        answer = "n"
     if answer in ("y", "yes"):
         return True
     with _menu_result_output():
@@ -1849,7 +2121,10 @@ class _ExtractOptions:
 
     def select_destination(self) -> None:
         _clear_screen()
-        self.destination = _prompt("Destination directory", self.destination)
+        try:
+            self.destination = _prompt("Destination directory", self.destination)
+        except _CancelPrompt:
+            return
 
     def select_members(self, engine: ArchiveEngine) -> None:
         self.members = _menu_members(engine, self.archive, self.password, self.members)
@@ -1865,12 +2140,22 @@ class _ExtractOptions:
 
     def select_strip_components(self) -> None:
         _clear_screen()
+        context: list[str] = []
         while True:
             try:
-                self.strip_components = _parse_count(_prompt("Strip components", str(self.strip_components)))
+                tty = sys.stdin.isatty() and sys.stdout.isatty()
+                if tty:
+                    raw = _prompt("Strip components", str(self.strip_components), context=context)
+                else:
+                    raw = _prompt("Strip components", str(self.strip_components))
+                self.strip_components = _parse_count(raw)
+                return
+            except _CancelPrompt:
                 return
             except argparse.ArgumentTypeError as exc:
-                print(f"  {_safe(exc)}")
+                context = [_safe(exc)]
+                if not tty:
+                    print(f"  {_safe(exc)}")
 
     def select_password(self) -> None:
         self.password = _menu_edit_password(

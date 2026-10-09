@@ -1,6 +1,7 @@
 """Manual archive paths through the existing builtin line input."""
 
 from pathlib import Path
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -242,31 +243,35 @@ def test_manual_rejection_context_has_closed_quotes_and_space_counts_within_cell
 
 
 @pytest.mark.parametrize("size", [(80, 24), (40, 10)])
-def test_compact_and_full_stripped_hint_remain_visible_above_fresh_prompt(
+def test_compact_and_full_stripped_hint_remain_visible_above_prefilled_prompt(
         monkeypatch, tmp_path, capsys, size):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "archive.zip").touch()
     monkeypatch.setattr(snug.sys, "stdin", SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr(snug.sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(snug, "_term_size", lambda: size)
-    calls = []
+    monkeypatch.setattr(snug, "_prompt_raw_mode", nullcontext)
+    monkeypatch.setattr(snug, "_PROMPT_HISTORY", {})
+    raw = " archive.zip "
+    keys = iter([*("space" if char == " " else char for char in raw), "enter"])
+    retried = []
 
-    def read(prompt):
-        calls.append(prompt)
-        if len(calls) == 1:
-            # Ignore the initial screen setup before inspecting rejection output.
+    def read(timeout):
+        key = next(keys, None)
+        if key is not None:
             capsys.readouterr()
-            return " archive.zip "
+            return key
         rows = _terminal_rows(capsys.readouterr().out, size)
         assert any("Not a file" in line for line in rows.values())
         assert any("stripped path exists" in line for line in rows.values())
-        assert prompt == "  Archive path: "
-        return ""
+        assert any(line == "> " + raw for line in rows.values())
+        retried.append(True)
+        return "esc"
 
-    monkeypatch.setattr("builtins.input", read)
+    monkeypatch.setattr(snug, "_read_key_timeout", read)
 
     assert snug._handle_manual_path() is None
-    assert calls == ["  Archive path: "] * 2
+    assert retried == [True]
 
 
 @pytest.mark.parametrize("size", [(80, 24), (40, 10)])
