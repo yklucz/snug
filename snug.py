@@ -26,7 +26,7 @@ from collections import deque
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Protocol, Sequence, TypeVar
+from typing import TYPE_CHECKING, Callable, Mapping, Protocol, Sequence, TypeVar
 
 if TYPE_CHECKING:
     from snug_update import AutomaticCheck
@@ -51,6 +51,15 @@ class _QuitInteractive(Exception):
 
 class _CancelPrompt(Exception):
     """Return from one line prompt without changing its caller's value."""
+
+
+class _PromptAction(Exception):
+    """An optional editor action, carrying the untouched input buffer."""
+
+    def __init__(self, action: str, text: str) -> None:
+        super().__init__(action)
+        self.action = action
+        self.text = text
 
 
 class _TerminalEOF(KeyboardInterrupt):
@@ -221,6 +230,8 @@ def _read_key_windows() -> str:
     ch = getch()
     if ch == b"\x03":
         raise KeyboardInterrupt
+    if ch == b"\t":
+        return "confirm"
     if ch in (b"\xe0", b"\x00"):  # extended key prefix
         return _decode_extended_windows(getch)
     return _decode_simple_char(ch)
@@ -748,8 +759,9 @@ class _PickerScreen:
 
     _NAV_KEYS = frozenset(("up", "down", "left", "right"))
 
-    def __init__(self, origin: Path) -> None:
+    def __init__(self, origin: Path, *, single: bool = False) -> None:
         self.origin = origin
+        self.single = single
         self.current = origin
         self.entries: list[Path] = []
         self._directories: set[Path] = set()
@@ -822,11 +834,13 @@ class _PickerScreen:
     def _header_lines(self, cols: int) -> list[str]:
         if self._mode == "compact":
             location = f"Filter: {self.filter}" if self.filter else _safe(self.current)
+            if self.single:
+                return [_paint("↵ Open/OK · ", _C.BOLD) + location]
             return [_paint(f"Marked ({len(self.marked)}) · ↵ Open/OK · ", _C.BOLD)
                     + location]
         lines = [
             "",
-            "  " + _paint("Select sources to archive", _C.BOLD),
+            "  " + _paint("Select an archive" if self.single else "Select sources to archive", _C.BOLD),
             "  " + _paint("─" * min(cols - 6, 50), _C.CYAN),
             "  " + _breadcrumb(self.current, self.origin, cols - 4),
         ]
@@ -862,11 +876,21 @@ class _PickerScreen:
             name = _paint(name, _C.BOLD_BLUE)
         elif entry.is_symlink():
             name = _paint(name, _C.CYAN)
+        if self.single:
+            return f"  {cursor_marker} {name}"
         return f"  {cursor_marker} {mark_marker} {name}"
 
     def footer(self) -> list[str]:
         if self._mode == "small":
             return []
+        if self.single:
+            if self._mode == "compact":
+                return [_paint("↑↓ ←→ Tab OK · Esc/Ctrl+C Back / Filter", _C.DIM)]
+            return [
+                "  " + _paint("Enter/→ open dir · Enter/Tab choose file", _C.DIM),
+                "  " + _paint("↑↓ move · ← back · Type or / filter · Backspace erase filter", _C.DIM),
+                "  " + _paint("Esc/Ctrl+C return to path · q cancel unfiltered", _C.DIM),
+            ]
         if self._mode == "compact":
             help_line = ("Space Mark Tab Confirm Esc Clear/Cancel" if self.filter or self.filter_mode
                          else "Space Mark · Tab Confirm · Esc Cancel")
@@ -891,8 +915,7 @@ class _PickerScreen:
             if visible and self._can_enter(visible[self.cursor]):
                 self._enter()
                 return None
-            self._confirm(highlighted=True)
-            return _EXIT
+            return _EXIT if self._confirm(highlighted=True) else None
         if key == "quit":
             self._cancel()
             return _EXIT
@@ -908,7 +931,7 @@ class _PickerScreen:
         self, key: str
     ) -> "Screen | _ExitMarker | None":
         if key == "esc":
-            if self.filter or self.filter_mode:
+            if not self.single and (self.filter or self.filter_mode):
                 self.filter = ""
                 self.filter_mode = False
                 self.cursor = 0
@@ -920,7 +943,8 @@ class _PickerScreen:
                 self.filter = self.filter[:-1]
                 self.cursor = 0
             return None
-        self._toggle_mark()
+        if not self.single:
+            self._toggle_mark()
         return None
 
     def _handle_nav(self, key: str) -> None:
@@ -972,7 +996,7 @@ class _PickerScreen:
                     and not target.is_symlink()))
 
     def _go_up(self) -> None:
-        if self.current == self.origin:
+        if self.current == self.current.parent or (not self.single and self.current == self.origin):
             return
         previous = self.current
         parent = previous.parent
@@ -998,6 +1022,18 @@ class _PickerScreen:
         self._notice = None
 
     def _confirm(self, *, highlighted: bool = False) -> bool:
+        if self.single:
+            visible = self._visible()
+            if not visible:
+                self._notice = "No file highlighted."
+                return False
+            target = visible[self.cursor]
+            if target.is_dir():
+                self._notice = ("Symlinked directories cannot be opened." if target.is_symlink()
+                                else "Choose a file; Enter/→ opens dirs.")
+                return False
+            self.result = [target]
+            return True
         if self.marked:
             self.result = sorted(self.marked, key=str)
             return True
@@ -1013,18 +1049,23 @@ class _PickerScreen:
         self.result = None
 
 
-def _select_sources_arrow(origin: Path) -> list[Path] | None:
-    """Arrow-key file picker restricted to *origin* and its descendants.
+def _select_sources_arrow(origin: Path, *, single: bool = False) -> list[Path] | None:
+    """Shared arrow-key picker, restricted to *origin* in multi-select mode.
 
-    Returns the list of selected paths, or ``None`` if the user cancelled.
+    Returns selected paths (one in single mode), or ``None`` on cancellation.
+    Single mode can go up beyond *origin* and remembers its last directory.
     """
+    global _ARCHIVE_BROWSE_DIRECTORY
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return None
-    screen = _PickerScreen(origin)
+    screen = _PickerScreen(origin, single=single)
     try:
         _run_screen(screen)
     except KeyboardInterrupt:
         return None
+    finally:
+        if single:
+            _ARCHIVE_BROWSE_DIRECTORY = screen.current
     return screen.result
 
 
@@ -1193,6 +1234,7 @@ class _LineEditor:
 
     initial_text: str = ""
     history: Sequence[str] = ()
+    extra_keys: Mapping[str, str] = field(default_factory=dict)
     buffer: str = field(init=False)
     cursor: int = field(init=False)
     history_position: int = field(init=False)
@@ -1210,6 +1252,8 @@ class _LineEditor:
             return "submit" if key == "enter" else "cancel"
         if key == "ctrl_d" and not self.buffer:
             return "eof"
+        if key in self.extra_keys:
+            return self.extra_keys[key]
         boundaries = _edit_boundaries(self.buffer)
         previous = max((pos for pos in boundaries if pos < self.cursor), default=0)
         following = min((pos for pos in boundaries if pos > self.cursor), default=len(self.buffer))
@@ -1334,10 +1378,12 @@ def _prompt_raw_mode():
 
 
 _PROMPT_HISTORY: dict[str, list[str]] = {}
+_ARCHIVE_BROWSE_DIRECTORY: Path | None = None
 
 
-def _edit_line(label: str, initial_text: str, context: Sequence[str], history_key: str) -> str:
-    editor = _LineEditor(initial_text, _PROMPT_HISTORY.get(history_key, ()))
+def _edit_line(label: str, initial_text: str, context: Sequence[str], history_key: str,
+               *, extra_keys: Mapping[str, str] | None = None, hint: str | None = None) -> str:
+    editor = _LineEditor(initial_text, _PROMPT_HISTORY.get(history_key, ()), extra_keys or {})
     drawn_size = None
     redraw = True
     while True:
@@ -1352,7 +1398,7 @@ def _edit_line(label: str, initial_text: str, context: Sequence[str], history_ke
                     else:
                         visible, cursor = _editor_view(editor, cols - 3)
                         lines = list(context[:max(0, rows - 3)]) + [label, "> " + visible]
-                        _draw_lines(lines, footer=["Enter: submit · Esc/Ctrl+C: cancel"], size=size)
+                        _draw_lines(lines, footer=[hint or "Enter: submit · Esc/Ctrl+C: cancel"], size=size)
                         sys.stdout.write(_cursor_at(len(lines), 3 + cursor, size=size) + _SHOW_CURSOR)
                     sys.stdout.flush()
                     drawn_size = size
@@ -1377,6 +1423,8 @@ def _edit_line(label: str, initial_text: str, context: Sequence[str], history_ke
                         if not history or history[-1] != editor.buffer:
                             history.append(editor.buffer)
                     return editor.buffer
+                if action is not None:
+                    raise _PromptAction(action, editor.buffer)
                 redraw = True
         # A previously installed signal handler may return normally. Resume
         # editing the same buffer and cursor after it runs in restored mode.
@@ -1385,7 +1433,8 @@ def _edit_line(label: str, initial_text: str, context: Sequence[str], history_ke
 
 def _prompt(prompt: str, default: str = "", *, preserve_spaces: bool = False,
             initial_text: str = "", context: Sequence[str] = (),
-            history_key: str | None = None) -> str:
+            history_key: str | None = None, extra_keys: Mapping[str, str] | None = None,
+            hint: str | None = None) -> str:
     """Prompt for a line of input, returning *default* on a blank entry."""
     suffix = f" [{_safe(default)}]" if default else ""
     tty = sys.stdin.isatty() and sys.stdout.isatty()
@@ -1394,7 +1443,8 @@ def _prompt(prompt: str, default: str = "", *, preserve_spaces: bool = False,
     try:
         if tty:
             response = _edit_line(f"  {_safe(prompt)}{suffix}:", initial_text, context,
-                                  history_key if history_key is not None else prompt)
+                                  history_key if history_key is not None else prompt,
+                                  extra_keys=extra_keys, hint=hint)
         else:
             response = input(f"  {_safe(prompt)}{suffix}: ")
     except EOFError as exc:
@@ -1478,6 +1528,20 @@ def _manual_path_error(raw: str) -> list[str]:
     return lines
 
 
+def _archive_browse_start(raw: str) -> Path:
+    """Use typed path context first; only an empty draft uses session memory."""
+    if not raw:
+        if _ARCHIVE_BROWSE_DIRECTORY is not None and _ARCHIVE_BROWSE_DIRECTORY.is_dir():
+            return _ARCHIVE_BROWSE_DIRECTORY
+        return Path.cwd()
+    candidate = Path(raw)
+    if candidate.is_dir():
+        return candidate.absolute()
+    if candidate.parent.is_dir():
+        return candidate.parent.absolute()
+    return Path.cwd()
+
+
 def _handle_manual_path() -> Path | None:
     _clear_screen()
     print()
@@ -1487,11 +1551,21 @@ def _handle_manual_path() -> Path | None:
         try:
             if sys.stdin.isatty() and sys.stdout.isatty():
                 raw = _prompt("Archive path", preserve_spaces=True,
-                              initial_text=initial_text, context=context)
+                              initial_text=initial_text, context=context,
+                              extra_keys={"confirm": "browse"},
+                              hint="Enter OK · Tab Browse · Esc/Ctrl+C Back")
             else:
                 raw = _prompt("Archive path", preserve_spaces=True)
         except _CancelPrompt:
             return None
+        except _PromptAction as action:
+            if action.action != "browse":
+                raise
+            initial_text = action.text
+            picked = _select_sources_arrow(_archive_browse_start(initial_text), single=True)
+            if picked is None:
+                continue
+            raw = str(picked[0])
         if not raw:
             return None
         candidate = Path(raw)
@@ -2354,6 +2428,8 @@ def _run_menu_choice(engine: ArchiveEngine) -> int | None:
 
 def _interactive_menu() -> int:
     """Run the Snug interactive shell.  Returns a process exit code."""
+    global _ARCHIVE_BROWSE_DIRECTORY
+    _ARCHIVE_BROWSE_DIRECTORY = None
     _enable_ansi_windows()
     _init_color()
     engine = ArchiveEngine()
