@@ -115,7 +115,7 @@ def test_space_is_inert_and_single_footer_fits_without_marks(tmp_path, monkeypat
 
     assert "source-23.txt" in rendered
     assert "Marked" not in rendered and "Space" not in rendered
-    assert "Tab" in rendered and "Esc/Ctrl+C" in rendered
+    assert "Tab" in rendered and "Esc" in rendered and "Ctrl+C" in rendered
     assert "↵ Open/OK" in rendered or "Enter/→ open dir" in rendered
     assert len(screen.footer()) == (3 if size == (80, 24) else 1)
     assert all(_cells(line) <= size[0] - 1 for line in screen.footer())
@@ -142,6 +142,8 @@ def test_browser_cancel_returns_to_exact_prefilled_prompt(
     keys = [*("space" if char == " " else char for char in draft), "confirm"]
     if filtering:
         keys.extend(["/", "x"])
+        if cancel == "esc":
+            keys.append("esc")
     tty_prompt([*keys, cancel, prefilled])
     monkeypatch.setattr(snug, "_term_size", lambda: size)
 

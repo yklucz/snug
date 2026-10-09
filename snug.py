@@ -123,7 +123,14 @@ def _run_screen(initial: Screen) -> None:
                     _draw_lines(screen.draw(cols, rows), footer=screen.footer(), size=size)
                 drawn_size = size
                 redraw = False
-            key = _read_key_timeout(0.1)
+            try:
+                key = _read_key_timeout(0.1)
+            except _TerminalEOF:
+                raise
+            except KeyboardInterrupt:
+                if not getattr(screen, "cancel_on_interrupt", False):
+                    raise
+                key = "esc"
             if key is None:
                 continue
             # A resize may arrive during the input poll; gate the key against
@@ -486,6 +493,8 @@ def _match_option_key(key: str, options: list[tuple[str, str]]) -> bool:
 class _MenuScreen:
     """Full-screen option menu."""
 
+    cancel_on_interrupt = True
+
     _PINNED_ACTIONS = frozenset((
         "Back", "Quit", "Create archive", "Extract archive", "Test archive",
         "Use this selection", "Use these limits",
@@ -599,17 +608,20 @@ def _select_menu_plain(title: str, options: list[tuple[str, str]]) -> str | None
 
 
 def _select_menu(title: str, options: list[tuple[str, str]],
-                 subtitle: str | None = None) -> str | None:
+                 subtitle: str | None = None, *, cancel_on_interrupt: bool = True) -> str | None:
     """Display a full-screen arrow-navigable menu."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return _select_menu_plain(title, options)
     screen = _MenuScreen(title=title, subtitle=subtitle, options=options)
+    screen.cancel_on_interrupt = cancel_on_interrupt
     _run_screen(screen)
     return screen.result
 
 
 class _PauseScreen:
     """Bounded result/error output dismissed with Enter or Escape."""
+
+    cancel_on_interrupt = True
 
     def __init__(self, lines: list[str]) -> None:
         self.lines = lines
@@ -885,11 +897,13 @@ class _PickerScreen:
             return []
         if self.single:
             if self._mode == "compact":
+                if self.filter or self.filter_mode:
+                    return [_paint("↑↓ ←→ Tab OK · Esc Clear · Ctrl+C Back", _C.DIM)]
                 return [_paint("↑↓ ←→ Tab OK · Esc/Ctrl+C Back / Filter", _C.DIM)]
             return [
                 "  " + _paint("Enter/→ open dir · Enter/Tab choose file", _C.DIM),
                 "  " + _paint("↑↓ move · ← back · Type or / filter · Backspace erase filter", _C.DIM),
-                "  " + _paint("Esc/Ctrl+C return to path · q cancel unfiltered", _C.DIM),
+                "  " + _paint("Esc clears filter/cancels · Ctrl+C returns to path · q cancels unfiltered", _C.DIM),
             ]
         if self._mode == "compact":
             help_line = ("Space Mark Tab Confirm Esc Clear/Cancel" if self.filter or self.filter_mode
@@ -931,7 +945,7 @@ class _PickerScreen:
         self, key: str
     ) -> "Screen | _ExitMarker | None":
         if key == "esc":
-            if not self.single and (self.filter or self.filter_mode):
+            if self.filter or self.filter_mode:
                 self.filter = ""
                 self.filter_mode = False
                 self.cursor = 0
@@ -2138,7 +2152,7 @@ def _menu_limits(current: ExtractionLimits) -> ExtractionLimits:
         screen = _LimitsScreen(current)
         try:
             _run_screen(screen)
-        except KeyboardInterrupt as exc:
+        except _TerminalEOF as exc:
             if screen.editing is not None:
                 raise _QuitInteractive() from exc
             raise
@@ -2397,10 +2411,7 @@ def _run_menu_handler(engine: ArchiveEngine,
         with _menu_result_output():
             print(f"\n  error: {_safe(exc)}\n")
 
-    try:
-        _wait_for_enter()
-    except KeyboardInterrupt:
-        return 130
+    _wait_for_enter()
 
     return None
 
@@ -2412,6 +2423,7 @@ def _run_menu_choice(engine: ArchiveEngine) -> int | None:
             "Select an action",
             _MENU_OPTIONS,
             subtitle=f"  Working directory: {Path.cwd()}",
+            cancel_on_interrupt=False,
         )
     except KeyboardInterrupt:
         return 130

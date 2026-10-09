@@ -115,10 +115,11 @@ def test_raw_descriptor_eof_still_quits_instead_of_cancelling_prompt(unix_input,
 
 @pytest.mark.parametrize("payload", [b"\x03", b""], ids=["Ctrl-C", "EOF"])
 @pytest.mark.parametrize("screen", ["main", "picker", "members", "limits", "limits-field"])
-def test_other_screens_keep_their_existing_interrupt_and_eof_contracts(
+def test_screens_distinguish_local_ctrl_c_cancellation_from_raw_eof(
         unix_input, monkeypatch, tmp_path, payload, screen):
     prefix = b"e9" if screen == "limits-field" else b""
-    unix_input(prefix + payload, eof=not payload)
+    suffix = b"\x1b" if screen == "limits-field" and payload else b""
+    unix_input(prefix + payload + suffix, eof=not payload)
     monkeypatch.setattr(snug.sys.stdin, "isatty", lambda: True, raising=False)
     monkeypatch.setattr(snug.sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(snug, "_term_size", lambda: (40, 10))
@@ -130,14 +131,20 @@ def test_other_screens_keep_their_existing_interrupt_and_eof_contracts(
     elif screen == "members":
         engine = Mock(spec=snug.ArchiveEngine)
         engine.inspect.return_value = SimpleNamespace(entries=[snug.ArchiveEntry("one")])
-        with pytest.raises(KeyboardInterrupt):
-            snug._menu_members(engine, tmp_path / "archive.zip", None, ["one"])
+        if payload:
+            assert snug._menu_members(engine, tmp_path / "archive.zip", None, ["one"]) == ["one"]
+        else:
+            with pytest.raises(KeyboardInterrupt):
+                snug._menu_members(engine, tmp_path / "archive.zip", None, ["one"])
         engine.inspect.assert_called_once()
         engine.extract.assert_not_called()
     else:
         original = snug.ExtractionLimits(max_entries=3)
-        with pytest.raises(snug._QuitInteractive if screen == "limits-field" else KeyboardInterrupt):
-            snug._menu_limits(original)
+        if payload:
+            assert snug._menu_limits(original) is original
+        else:
+            with pytest.raises(snug._QuitInteractive if screen == "limits-field" else KeyboardInterrupt):
+                snug._menu_limits(original)
         assert original == snug.ExtractionLimits(max_entries=3)
 
 

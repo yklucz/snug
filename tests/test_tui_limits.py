@@ -288,22 +288,34 @@ def test_reopening_limits_rollback_preserves_prior_apply_and_next_operation_defa
 
 
 @pytest.mark.parametrize("editing", [False, True], ids=["overview", "field"])
-def test_limits_ctrl_c_keeps_existing_overview_or_prompt_exit_semantics(
+def test_limits_ctrl_c_discards_overview_or_only_active_field(
         monkeypatch, editing):
     _tty(monkeypatch)
     original = snug.ExtractionLimits(max_entries=3)
     seen = []
 
-    def interrupt(screen):
-        seen.append(screen)
-        if editing:
-            screen.handle("e")
-            _type(screen, "9")
-        raise KeyboardInterrupt
+    real_loop = snug._run_screen
 
-    monkeypatch.setattr(snug, "_run_screen", interrupt)
-    with pytest.raises(snug._QuitInteractive if editing else KeyboardInterrupt):
-        snug._menu_limits(original)
+    def observe(screen):
+        seen.append(screen)
+        real_loop(screen)
+
+    def overview(timeout):
+        assert seen[0].editing is None and seen[0].buffer == ""
+        assert seen[0].values["max_entries"] == 3
+        return "esc"
+
+    events = iter(["e", "9", KeyboardInterrupt(), overview] if editing else [KeyboardInterrupt()])
+
+    def read(timeout):
+        event = next(events)
+        if isinstance(event, BaseException):
+            raise event
+        return event(timeout) if callable(event) else event
+
+    monkeypatch.setattr(snug, "_run_screen", observe)
+    monkeypatch.setattr(snug, "_read_key_timeout", read)
+    assert snug._menu_limits(original) is original
     assert seen[0].limits_result is original
     assert original == snug.ExtractionLimits(max_entries=3)
 
@@ -347,7 +359,7 @@ def test_result_and_error_workflows_dismiss_with_escape_or_enter(monkeypatch, er
     assert "Enter" in visible and "Esc" in visible
 
 
-def test_ctrl_c_on_result_pause_keeps_interrupted_exit_code(monkeypatch):
+def test_ctrl_c_on_result_pause_dismisses_without_exit_code(monkeypatch):
     output = _tty(monkeypatch)
 
     def handler(engine):
@@ -358,7 +370,7 @@ def test_ctrl_c_on_result_pause_keeps_interrupted_exit_code(monkeypatch):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(snug, "_read_key_timeout", interrupt)
-    assert snug._run_menu_handler(SimpleNamespace(), handler) == 130
+    assert snug._run_menu_handler(SimpleNamespace(), handler) is None
     visible = SGR.sub("", "\n".join(_terminal_rows(output.getvalue(), (80, 24)).values()))
     assert "completed result before interrupt" in visible
 
