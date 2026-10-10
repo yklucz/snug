@@ -794,7 +794,7 @@ def test_compression_escape_preserves_prior_value(tty_prompt, quiet_tui, current
 def test_invalid_numeric_prompt_keeps_visible_error_on_retry_then_escape_discards(
         tty_prompt, monkeypatch, tmp_path, quiet_tui, size, kind):
     invalid = "99" if kind == "compression" else "-1"
-    message = ("compression level from 0 to 9" if kind == "compression"
+    message = ("Use 0-9, or default." if kind == "compression"
                else "count must be a nonnegative integer")
     checked = []
 

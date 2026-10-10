@@ -176,7 +176,7 @@ def test_every_screen_obeys_row_column_and_footer_budgets(monkeypatch, tmp_path,
     if size != (80, 24):
         assert len(footer) == 1
         if kind.startswith("picker"):
-            assert "Confirm" in visible and "Cancel" in visible
+            assert "Tab OK" in visible and "Esc/Ctrl+C Back" in visible
         elif kind in ("subtitle", "members"):
             assert "Back" in visible
             assert ("Extract archive" if kind == "subtitle" else "Use this selection") in visible
@@ -302,9 +302,9 @@ def test_compact_picker_footer_describes_filter_space_and_escape(monkeypatch, tm
     screen.handle(key)
     screen.draw(40, 10)
     footer = "\n".join(screen.footer())
-    assert "Esc Clear/Cancel" in footer
+    assert "Esc Clear" in footer and "Clear/Cancel" not in footer
     assert "Space Mark" in footer
-    assert "Tab Confirm" in footer
+    assert "Tab OK" in footer and "Ctrl+C Back" in footer
     assert _cells(footer) <= 39
     screen.draw(80, 24)
     assert "Space mark" in "\n".join(screen.footer())
@@ -391,7 +391,7 @@ def test_idle_resize_preserves_active_filter_and_marks_until_escape(monkeypatch,
     assert [frame[0] for frame in frames] == [(80, 24), (20, 8), (40, 10), (40, 10)]
     assert "Filter: i" in frames[2][1][0]
     assert any(screen.entries[17].name in line for line in frames[2][1])
-    assert "Clear/Cancel" in frames[2][2][0]
+    assert "Esc Clear" in frames[2][2][0] and "Ctrl+C Back" in frames[2][2][0]
     assert screen.current == original[1] and screen.marked == original[2]
     assert screen.filter == "" and not screen.filter_mode and screen.result is None
 

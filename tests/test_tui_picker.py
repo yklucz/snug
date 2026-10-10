@@ -389,7 +389,7 @@ def test_new_picker_help_fits_full_and_compact_layouts(tmp_path, monkeypatch, si
     assert "source-23.txt" in rendered
     assert "Marked (1)" in rendered
     assert "Space" in rendered and "Mark" in rendered
-    assert "Tab" in rendered and "confirm" in rendered.lower()
+    assert "Tab use marks" in rendered if size == (80, 24) else "Tab OK" in rendered
     assert "Esc" in rendered
     assert len(screen.footer()) == (3 if size == (80, 24) else 1)
     if size == (80, 24):

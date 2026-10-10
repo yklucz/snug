@@ -290,6 +290,6 @@ def test_long_edge_spaces_have_visible_counts_after_quoted_context_is_clipped(
     assert "…" in rows[2]
     assert any("Leading spaces: 100" in line for line in rows.values())
     assert any("Trailing spaces: 101" in line for line in rows.values())
-    assert any("read-only" in line for line in rows.values())
+    assert any("Edit the path below." in line for line in rows.values())
     assert any("empty returns" in line for line in rows.values())
     assert all(_cells(line) <= size[0] - 1 for line in rows.values())

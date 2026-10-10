@@ -440,7 +440,7 @@ def _size_mode(cols: int, rows: int) -> str:
 
 
 def _too_small_lines() -> list[str]:
-    return ["Terminal too small", "Minimum: 40x10", "Esc: current back action · Ctrl+C: interrupt"]
+    return ["Terminal too small", "Minimum: 40x10", "Esc: back · Ctrl+C: cancel/quit"]
 
 
 def _term_size() -> tuple[int, int]:
@@ -565,10 +565,12 @@ class _MenuScreen:
         if self._mode == "small":
             return []
         if self._mode == "compact":
-            return [_paint("↑↓ Move · Enter Select · Esc/q Leave", _C.DIM)]
+            return [_paint("↑↓ Enter · Esc/q/Q/Ctrl+C back" if self.cancel_on_interrupt
+                           else "↑↓ Enter · Esc/q/Q quit · Ctrl+C 130", _C.DIM)]
         return [
-            "  " + _paint("↑/↓ move · Enter select · shortcut activates", _C.DIM),
-            "  " + _paint("Esc / q leave this menu", _C.DIM),
+            "  " + _paint("↑/↓ move · Enter select · single-key shortcut activates", _C.DIM),
+            "  " + _paint("Esc/q/Q/Ctrl+C back" if self.cancel_on_interrupt
+                         else "Esc/q/Q/0 quit · Ctrl+C quits with 130", _C.DIM),
         ]
 
     def handle(self, key: str) -> "Screen | _ExitMarker | None":
@@ -637,7 +639,7 @@ class _PauseScreen:
     def footer(self) -> list[str]:
         if self._mode == "small":
             return []
-        hint = _paint("Enter / Esc to continue…", _C.DIM)
+        hint = _paint("Enter/Esc/Ctrl+C Continue", _C.DIM)
         return ["", "  " + hint] if self._mode == "full" else [hint]
 
     def handle(self, key: str) -> _ExitMarker | None:
@@ -702,7 +704,7 @@ def _entry_name(entry: Path) -> str:
 
 
 def _picker_help_line() -> str:
-    return "Enter/→ open dir · Enter file confirms · Space mark · Tab confirm marks"
+    return "Enter/→ open dir · Space mark · Tab use marks · Enter file: marks or file"
 
 
 # -- breadcrumb rendering --------------------------------------------------- #
@@ -903,15 +905,15 @@ class _PickerScreen:
             return [
                 "  " + _paint("Enter/→ open dir · Enter/Tab choose file", _C.DIM),
                 "  " + _paint("↑↓ move · ← back · Type or / filter · Backspace erase filter", _C.DIM),
-                "  " + _paint("Esc clears filter/cancels · Ctrl+C returns to path · q cancels unfiltered", _C.DIM),
+                "  " + _paint("Esc clears filter/cancels · Ctrl+C returns to path · q/Q cancel unfiltered", _C.DIM),
             ]
         if self._mode == "compact":
-            help_line = ("Space Mark Tab Confirm Esc Clear/Cancel" if self.filter or self.filter_mode
-                         else "Space Mark · Tab Confirm · Esc Cancel")
+            help_line = ("Space Mark Tab OK Esc Clear Ctrl+C Back" if self.filter or self.filter_mode
+                         else "Space Mark Tab OK Esc/Ctrl+C Back")
             return [_paint(help_line, _C.DIM)]
         return [
             "  " + _paint(_picker_help_line(), _C.DIM),
-            "  " + _paint("↑↓ move · ← back · Type or / filter · Esc clear/cancel · q cancel unfiltered", _C.DIM),
+            "  " + _paint("↑↓ · ← up · Type or / filter · Esc clear/back · Ctrl+C back · q/Q unfiltered", _C.DIM),
             self._marked_line(),
         ]
 
@@ -1043,7 +1045,7 @@ class _PickerScreen:
                 return False
             target = visible[self.cursor]
             if target.is_dir():
-                self._notice = ("Symlinked directories cannot be opened." if target.is_symlink()
+                self._notice = ("Symlinked directories stay closed." if target.is_symlink()
                                 else "Choose a file; Enter/→ opens dirs.")
                 return False
             self.result = [target]
@@ -1056,7 +1058,7 @@ class _PickerScreen:
             visible = self._visible()
             self.result = [visible[self.cursor]] if visible else None
             return True
-        self._notice = "Nothing marked. Space marks; Tab confirms."
+        self._notice = "Nothing marked. Space marks; Tab OK."
         return False
 
     def _cancel(self) -> None:
@@ -1530,7 +1532,8 @@ def _manual_path_error(raw: str) -> list[str]:
     stripped = raw.strip()
     if stripped and stripped != raw and not Path(raw).exists() and Path(stripped).exists():
         lines.append("Hint: the stripped path exists.")
-    lines.extend(("Rejected text is read-only.", "Enter another path; empty returns."))
+    lines.extend(("Edit the path below." if tty else "Rejected text is read-only.",
+                  "Enter another path; empty returns."))
     if tty:
         lines = lines[:max(0, rows - 2)]
         _draw_lines(lines, size=(cols, rows))
@@ -1685,7 +1688,8 @@ def _menu_compression(current: int | None) -> int | None:
             tty = sys.stdin.isatty() and sys.stdout.isatty()
             default = "default" if current is None else str(current)
             if tty:
-                raw = _prompt("Compression level (0-9 or default)", default, context=context)
+                raw = _prompt("Compression (0-9/default)", default, context=context,
+                              history_key="Compression level (0-9 or default)")
             else:
                 raw = _prompt("Compression level (0-9 or default)", default)
         except _CancelPrompt:
@@ -1694,7 +1698,7 @@ def _menu_compression(current: int | None) -> int | None:
             return None
         if raw.isascii() and raw.isdecimal() and 0 <= int(raw) <= 9:
             return int(raw)
-        message = "Enter a compression level from 0 to 9, or default."
+        message = "Use 0-9, or default." if tty else "Enter a compression level from 0 to 9, or default."
         context = [message]
         if not tty:
             print("  " + message)
@@ -1951,10 +1955,10 @@ class _MembersScreen(_MenuScreen):
         if self._mode == "small":
             return []
         if self._mode == "compact":
-            return [_paint("Space Mark · Tab Confirm · Esc Cancel", _C.DIM)]
+            return [_paint("Space Mark Tab/r OK Esc/Ctrl+C Cancel", _C.DIM)]
         return [
             "  " + _paint("Space toggles member · Enter activates row · Tab / r confirm", _C.DIM),
-            "  " + _paint("↑↓ move · a all · n none · Esc / b / q cancel", _C.DIM),
+            "  " + _paint("↑↓ move · a all · n none · Esc/b/q/Q/Ctrl+C discard", _C.DIM),
         ]
 
     def _activate(self, choice: str | None) -> _ExitMarker | None:
@@ -1966,7 +1970,7 @@ class _MembersScreen(_MenuScreen):
             return _EXIT
         if choice == "r":
             if not any(name in self.marked for name in self.names):
-                self._notice = "Nothing marked. Space marks; Tab confirms."
+                self._notice = "Nothing marked. Space marks; Tab OK."
                 return None
             self.members_result = _menu_selected_members(self.names, self.marked)
             return _EXIT
@@ -2084,16 +2088,16 @@ class _LimitsScreen(_MenuScreen):
         if self._mode == "small":
             return []
         if self.editing is not None:
-            hint = "Enter Save · Esc Discard field"
+            hint = "Enter Save · Esc/Ctrl+C Discard field"
             return [_paint(hint, _C.DIM)] if self._mode == "compact" else [
                 "  " + _paint(hint, _C.DIM),
                 "  " + _paint("Apply on the limits screen keeps edits", _C.DIM),
             ]
         if self._mode == "compact":
-            return [_paint("Tab Apply · b/Esc/q/Q Discard edits", _C.DIM)]
+            return [_paint("Tab/a Apply b/Esc/q/Q/Ctrl+C Discard", _C.DIM)]
         return [
             "  " + _paint("↑↓ move · Enter activates · e/s/f/r edit", _C.DIM),
-            "  " + _paint("Tab / a Apply · b / Esc / q / Q discard edits", _C.DIM),
+            "  " + _paint("Tab/a apply · b/Esc/q/Q/Ctrl+C discard edits", _C.DIM),
         ]
 
     def _handle_field(self, key: str) -> None:
