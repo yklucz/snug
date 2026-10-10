@@ -142,11 +142,9 @@ Passwords use the CLI's secure getpass prompt, not this line editor. Ctrl+C at t
 
 Extraction is transactional per regular file. Files are staged and published after decoding succeeds. A later publication failure can leave earlier files, directories or links in place. There is no whole-archive rollback. [snug_core.py:1153](../snug_core.py#L1153), [snug_core.py:2135](../snug_core.py#L2135).
 
-### Non-TTY fallback
+### Piped and non-TTY input
 
-The no-argument entry point does not start a session when either stream is not a terminal. Helpers reached without both TTY streams use numbered text menus and ordinary line input; arrow picking and pause screens are bypassed. Enter the displayed option and press Enter. q, quit or exit cancels a numbered menu. [snug.py:2463](../snug.py#L2463), [snug.py:593](../snug.py#L593), [snug.py:615](../snug.py#L615), [snug.py:1464](../snug.py#L1464), [snug.py:1075](../snug.py#L1075), [snug.py:661](../snug.py#L661).
-
-In the limits fallback, b still applies the edited limits. EOF or Ctrl+C at a fallback line prompt ends the session with status 0. EOF in a numbered menu cancels that menu; at the main menu this ends the session with status 0. EOF at the limits overview keeps the original limits. [snug.py:2176](../snug.py#L2176), [snug.py:2174](../snug.py#L2174), [snug.py:2403](../snug.py#L2403), [snug.py:1466](../snug.py#L1466), [snug.py:1470](../snug.py#L1470), [snug.py:601](../snug.py#L601), [snug.py:2435](../snug.py#L2435).
+With no arguments, Snug requires both standard input and standard output to be terminals. If either stream is piped, redirected or otherwise non-TTY, Snug prints command-line help and exits with status 1 without starting the menu. Use an explicit CLI command for non-interactive operation. [snug.py:3270](../snug.py#L3270), [snug.py:2463](../snug.py#L2463).
 
 ## Paths inserted by terminals
 

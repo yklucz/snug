@@ -2105,7 +2105,7 @@ class _LimitsScreen(_MenuScreen):
             self.editing = None
             self.buffer = ""
             self._notice = None
-        elif key == "enter":
+        elif key == "enter" and self.editing is not None:
             field = next(field for shortcut, _, field in self._FIELDS if shortcut == self.editing)
             raw = self.buffer.strip() or _menu_limit_label(self.values[field])
             parser = {"e": _parse_count, "s": parse_size, "f": parse_size, "r": _parse_ratio}[self.editing]
@@ -2238,8 +2238,8 @@ class _ExtractOptions:
         _clear_screen()
         context: list[str] = []
         while True:
+            tty = sys.stdin.isatty() and sys.stdout.isatty()
             try:
-                tty = sys.stdin.isatty() and sys.stdout.isatty()
                 if tty:
                     raw = _prompt("Strip components", str(self.strip_components), context=context)
                 else:
