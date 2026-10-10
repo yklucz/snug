@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, localcontext
 from enum import Enum
 from pathlib import Path, PurePosixPath
+from tarfile import HeaderError
 from typing import Callable, Iterable, Literal, Protocol, Sequence
 
 __version__ = "1.9.0"
@@ -1337,6 +1338,53 @@ def _password_bytes(password) -> bytes | None:
     return str(password).encode("utf-8")
 
 
+@dataclass
+class _TarHeaderState:
+    offset: int
+    metadata_end: int | None = None
+
+
+def _inspection_tarinfo(path: Path) -> type[tarfile.TarInfo]:
+    """Check headers during tarfile's existing traversal, including metadata."""
+    headers: list[_TarHeaderState] = []
+    message = f"TAR archive {str(path)!r} is truncated"
+    metadata_types = (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE,
+                      tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK)
+
+    class CheckedTarInfo(tarfile.TarInfo):
+        @classmethod
+        def fromtarfile(cls, tarfile: tarfile.TarFile) -> tarfile.TarInfo:
+            archive = tarfile
+            state = _TarHeaderState(archive.fileobj.tell())
+            headers.append(state)
+            try:
+                return super().fromtarfile(archive)
+            except HeaderError:
+                # A short metadata read can otherwise become InvalidHeaderError,
+                # which tarfile treats as EOF after the first member.
+                if state.metadata_end is not None and archive.fileobj.tell() < state.metadata_end:
+                    raise ArchiveError(message) from None
+                raise
+            finally:
+                headers.pop()
+
+        @classmethod
+        def frombuf(cls, buf: bytes | bytearray, encoding: str, errors: str) -> tarfile.TarInfo:
+            if 0 < len(buf) < tarfile.BLOCKSIZE and any(buf):
+                raise ArchiveError(message)
+            if len(headers) > 1 and headers[-2].metadata_end is not None and not any(buf):
+                # Extended metadata requires a following member header, even
+                # when its payload is complete and the next block is all zero.
+                raise ArchiveError(message)
+            info = super().frombuf(buf, encoding, errors)
+            if headers and info.type in metadata_types:
+                padded = (info.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE * tarfile.BLOCKSIZE
+                headers[-1].metadata_end = headers[-1].offset + tarfile.BLOCKSIZE + padded
+            return info
+
+    return CheckedTarInfo
+
+
 class NativeBackend:
     """Standard-library ZIP and TAR containers, with bounded member I/O."""
 
@@ -1376,7 +1424,7 @@ class NativeBackend:
                                          {"encrypted": any(i.flag_bits & 1 for i in infos)})
         if password is not None:
             raise ArchiveError(_TAR_PASSWORD_MESSAGE)
-        with tarfile.open(path, "r:*") as tf:
+        with tarfile.open(path, "r:*", tarinfo=_inspection_tarinfo(path)) as tf:
             return ArchiveInspection([_tar_entry(m) for m in tf.getmembers()], {"encrypted": False})
 
     def list_entries(self, path: Path, password=None) -> list[ArchiveEntry]:
