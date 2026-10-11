@@ -189,8 +189,8 @@ Creation selects the format from the output suffix unless `--format` overrides i
 | `-r`, `--root DIR` | Store source paths relative to this directory. Without it, each source starts with its basename. Sources must be within the specified root. |
 | `-l`, `--level 0–9` | Set the compression level or preset where supported. Omit for the backend default. |
 | `--symlinks store\|follow\|skip` | Store links by default, follow their targets, or omit them. Format limitations still apply. |
-| `--force` | Allow replacement of an existing archive. Without it, creation refuses an existing output. |
-| `-q`, `--quiet` | Suppress progress and summary output; errors still appear. |
+| `--force` | Allow replacement after complete creation. Accidental skips preserve an existing archive. Without this option, creation refuses an existing output. |
+| `-q`, `--quiet` | Suppress progress and normal summaries. Accidental skip warnings and errors still appear. |
 
 For example, to store `folder/notes.txt` as `notes.txt`:
 
@@ -200,7 +200,13 @@ snug create notes.zip folder/notes.txt --root folder/
 
 ZIP and GZIP use levels 0–9. BZIP2 uses 1–9, with a requested 0 mapped to 1. XZ and LZMA use presets 0–9; 7z uses an LZMA2 preset when a level is supplied. Uncompressed TAR, CPIO, and AR have no compression-level effect. Higher levels generally trade time for compression; the CLI does not select arbitrary codecs.
 
-Snug streams large regular-file payloads and supports ZIP64. Native and libarchive operations report byte progress, speed, and ETA; 7z creation reports item progress because py7zr does not provide input-byte callbacks. Archive creation writes a temporary sibling file and replaces the destination after completion.
+Snug streams large regular-file payloads and supports ZIP64. Native and libarchive operations report byte progress, speed, and ETA; 7z creation reports item progress because py7zr does not provide input-byte callbacks. Archive creation writes a temporary sibling file before publishing the result.
+
+If an input is omitted because of an error, Snug warns on stderr with its path and cause, even with `-q`. It prints the first 20 accidental skips and a count of any remaining skips. A published partial archive returns status 5. The final warning gives the included and skipped input counts. [snug.py:1867](../snug.py#L1867), [snug.py:2753](../snug.py#L2753).
+
+An accidental skip prevents replacement of an existing archive, including with `--force`. Snug discards its temporary file, preserves the existing archive, and returns status 2. If no inputs could be included because of errors, Snug returns status 2 and publishes no archive. Some backends abort on input read errors instead of continuing with a partial archive. [snug_core.py:2210](../snug_core.py#L2210), [snug.py:3323](../snug.py#L3323).
+
+Intentional omissions keep status 0. These include `--symlinks skip`, unsupported source types, and duplicate names that refer to the same real file. Different files with the same archive name cause an accidental skip. If file identity cannot be determined, Snug keeps the existing silent deduplication behavior. [snug_core.py:905](../snug_core.py#L905), [snug.py:2757](../snug.py#L2757).
 
 ## Extract archives
 
@@ -362,6 +368,7 @@ Checks report the latest stable release; only `snug update` requests installatio
 | `2` | Invalid CLI arguments, an archive/format/I/O error, or unhealthy required components reported by `doctor`. |
 | `3` | Extraction or integrity testing rejected an unsafe archive. |
 | `4` | An explicit extraction resource limit was exceeded. |
-| `130` | Command interrupted. In the TUI, main-menu, secure-password or archive-operation interruptions can exit with 130; screen cancellation follows the rules above. [snug.py:2433](../snug.py#L2433), [snug.py:2459](../snug.py#L2459), [snug.py:3261](../snug.py#L3261). |
+| `5` | An archive was created but is incomplete because inputs were skipped due to errors. [snug.py:2753](../snug.py#L2753). |
+| `130` | Command interrupted. In the TUI, main-menu, secure-password or archive-operation interruptions can exit with 130; screen cancellation follows the rules above. [snug.py:2492](../snug.py#L2492), [snug.py:2519](../snug.py#L2519), [snug.py:3330](../snug.py#L3330). |
 
 For error messages and fixes, see [Troubleshooting](troubleshooting.md).

@@ -357,8 +357,8 @@ class LibarchiveBackend:
                     report: CreateReport, progress: ProgressSink) -> None:
         try:
             st = source.stat() if symlinks == "follow" else source.lstat()
-        except (FileNotFoundError, PermissionError):
-            report.skipped.append(name)
+        except OSError as exc:
+            report.record_skip(source, exc.strerror or str(exc))
             return
         # libarchive-c's float setter swaps seconds/fractions, overflowing a
         # Windows 32-bit C long. Its tuple setter preserves the actual time.
@@ -375,14 +375,17 @@ class LibarchiveBackend:
             writer.add_files(source.as_posix(), pathname=name, recursive=False,
                              symlink_mode="physical")
             report.symlinks += 1
+            report.included_inputs += 1
         elif stat.S_ISDIR(st.st_mode):
             writer.add_file_from_memory(name, 0, b"", filetype=stat.S_IFDIR, **attributes)
             report.directories += 1
+            report.included_inputs += 1
         elif stat.S_ISREG(st.st_mode):
             writer.add_file_from_memory(name, st.st_size, self._file_chunks(source, progress),
                                         filetype=stat.S_IFREG, **attributes)
             report.files += 1
             report.bytes_in += st.st_size
+            report.included_inputs += 1
         else:
             report.skipped.append(name)
 
@@ -773,8 +776,8 @@ class SevenZipBackend:
                     report: CreateReport) -> None:
         try:
             st = source.stat() if symlinks == "follow" else source.lstat()
-        except (FileNotFoundError, PermissionError):
-            report.skipped.append(name)
+        except OSError as exc:
+            report.record_skip(source, exc.strerror or str(exc))
             return
         if stat.S_ISLNK(st.st_mode) and symlinks == "skip":
             report.skipped.append(name)
@@ -785,6 +788,7 @@ class SevenZipBackend:
             report.skipped.append(name)
             return
         archive.write(source, arcname=name)
+        report.included_inputs += 1
         if stat.S_ISDIR(st.st_mode):
             report.directories += 1
         elif stat.S_ISLNK(st.st_mode):

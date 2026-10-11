@@ -892,14 +892,6 @@ def _arcname_for(src: Path, root_abs: Path | None) -> str:
     return "" if rel == "." else rel
 
 
-def _already_archived(fs_path: Path, name: str, archive_real: str,
-                      seen_names: set[str]) -> bool:
-    """True when the path is the archive itself or a duplicate entry."""
-    if os.path.realpath(fs_path) == archive_real:
-        return True
-    return name in seen_names
-
-
 def _file_size(fs_path: Path) -> int:
     """Best-effort size of a regular file; 0 for dirs, symlinks and errors."""
     if fs_path.is_symlink() or not fs_path.is_file():
@@ -910,10 +902,11 @@ def _file_size(fs_path: Path) -> int:
         return 0
 
 
-def _iter_items(sources, *, root, symlinks: str, archive_real: str, cancel=None):
+def _iter_items(sources, *, root, symlinks: str, archive_real: str, cancel=None,
+                skip_errors: list[CreateSkip] | None = None):
     """Yield unique archive items, optionally stopping when *cancel* is set."""
     root_abs = Path(os.path.abspath(root)) if root is not None else None
-    seen_names: set[str] = set()
+    seen_names: dict[str, Path] = {}
 
     for source in sources:
         if cancel is not None and cancel.is_set():
@@ -925,15 +918,36 @@ def _iter_items(sources, *, root, symlinks: str, archive_real: str, cancel=None)
         for fs_path, name in _walk(src, arcname, symlinks=symlinks, seen=set()):
             if cancel is not None and cancel.is_set():
                 return
-            if not name or _already_archived(fs_path, name, archive_real, seen_names):
+            if not name or os.path.realpath(fs_path) == archive_real:
                 continue
-            seen_names.add(name)
+            previous = seen_names.get(name)
+            if previous is not None:
+                same_source = os.path.realpath(fs_path) == os.path.realpath(previous)
+                if not same_source:
+                    try:
+                        same_source = os.path.samefile(fs_path, previous)
+                    except OSError:
+                        # Identity is unclear after a source disappears. Retain
+                        # the existing duplicate-name behavior in that case.
+                        same_source = True
+                if not same_source and skip_errors is not None:
+                    skip_errors.append(CreateSkip(
+                        fs_path, f"archive name {name!r} also belongs to {previous}",
+                    ))
+                continue
+            seen_names[name] = fs_path
             yield fs_path, name
 
 
 # --------------------------------------------------------------------------- #
 #  Reports
 # --------------------------------------------------------------------------- #
+
+@dataclass
+class CreateSkip:
+    path: Path
+    reason: str
+
 
 @dataclass
 class CreateReport:
@@ -947,6 +961,14 @@ class CreateReport:
     bytes_out: int = 0
     elapsed: float = 0.0
     skipped: list[str] = field(default_factory=list)
+    included_inputs: int = 0
+    accidental_skips: int = 0
+    skip_errors: list[CreateSkip] = field(default_factory=list)
+    cleanup_warning: str | None = None
+
+    def record_skip(self, path: Path, reason: str) -> None:
+        self.accidental_skips += 1
+        self.skip_errors.append(CreateSkip(path, reason))
 
     @property
     def avg_speed(self) -> float:
@@ -955,6 +977,16 @@ class CreateReport:
     @property
     def ratio(self) -> float:
         return self.bytes_out / self.bytes_in if self.bytes_in else 0.0
+
+
+class CreateError(ArchiveError):
+    """Creation failed after omitting inputs, retaining their diagnostics."""
+
+    def __init__(self, message: str, report: CreateReport, *,
+                 preserved_existing: bool = False) -> None:
+        super().__init__(message)
+        self.report = report
+        self.preserved_existing = preserved_existing
 
 
 @dataclass
@@ -1521,15 +1553,16 @@ class NativeBackend:
         with tarfile.open(archive_path, mode=mode, **kwargs) as tf:
             for fs_path, arcname in items:
                 progress.item(arcname)
-                try:
-                    self._add_to_tar(tf, fs_path, arcname, report, progress)
-                except (FileNotFoundError, PermissionError):
-                    report.skipped.append(arcname)
+                self._add_to_tar(tf, fs_path, arcname, report, progress)
 
     @staticmethod
     def _add_to_tar(tf, fs_path: Path, arcname: str,
                     report: CreateReport, progress: ProgressSink) -> None:
-        ti = tf.gettarinfo(str(fs_path), arcname=arcname)
+        try:
+            ti = tf.gettarinfo(str(fs_path), arcname=arcname)
+        except OSError as exc:
+            report.record_skip(fs_path, exc.strerror or str(exc))
+            return
         if ti is None:
             report.skipped.append(arcname)
             return
@@ -1541,13 +1574,24 @@ class NativeBackend:
             tf.addfile(ti)
             report.directories += 1
         elif ti.isreg():
-            with open(fs_path, "rb") as fh:
+            try:
+                fh = open(fs_path, "rb")
+            except OSError as exc:
+                # gettarinfo caches the inode before payload opening. A later
+                # alias must not become a hardlink to this omitted member.
+                for inode, name in list(tf.inodes.items()):
+                    if name == ti.name:
+                        del tf.inodes[inode]
+                report.record_skip(fs_path, exc.strerror or str(exc))
+                return
+            with fh:
                 reader = _ProgressReader(fh, progress.chunk)
                 tf.addfile(ti, fileobj=reader)
             report.files += 1
             report.bytes_in += ti.size
         else:
             tf.addfile(ti)
+        report.included_inputs += 1
 
     # -- ZIP creation ---------------------------------------------------- #
 
@@ -1563,20 +1607,21 @@ class NativeBackend:
         ) as zf:
             for fs_path, arcname in items:
                 progress.item(arcname)
-                try:
-                    self._add_to_zip(
-                        zf, fs_path, arcname, symlinks, report, progress
-                    )
-                except (FileNotFoundError, PermissionError):
-                    report.skipped.append(arcname)
+                self._add_to_zip(
+                    zf, fs_path, arcname, symlinks, report, progress
+                )
 
     def _add_to_zip(self, zf, fs_path: Path, arcname: str,
                     symlinks, report: CreateReport,
                     progress: ProgressSink) -> None:
-        st = os.stat(fs_path) if symlinks == "follow" else fs_path.lstat()
+        try:
+            st = os.stat(fs_path) if symlinks == "follow" else fs_path.lstat()
+        except OSError as exc:
+            report.record_skip(fs_path, exc.strerror or str(exc))
+            return
         if stat.S_ISLNK(st.st_mode):
             self._zip_add_symlink(zf, fs_path, arcname, st, symlinks, report)
-        elif fs_path.is_dir():
+        elif stat.S_ISDIR(st.st_mode):
             self._zip_add_dir(zf, arcname, st, report)
         else:
             self._zip_add_file(zf, fs_path, arcname, st, report, progress)
@@ -1591,8 +1636,14 @@ class NativeBackend:
         zi.create_system = 3
         zi.external_attr = (stat.S_IFLNK | 0o777) << 16
         zi.compress_type = zipfile.ZIP_STORED
-        zf.writestr(zi, os.readlink(fs_path))
+        try:
+            target = os.readlink(fs_path)
+        except OSError as exc:
+            report.record_skip(fs_path, exc.strerror or str(exc))
+            return
+        zf.writestr(zi, target)
         report.symlinks += 1
+        report.included_inputs += 1
 
     @staticmethod
     def _zip_add_dir(zf, arcname, st, report: CreateReport) -> None:
@@ -1605,6 +1656,7 @@ class NativeBackend:
         zi.compress_type = zipfile.ZIP_STORED
         zf.writestr(zi, b"")
         report.directories += 1
+        report.included_inputs += 1
 
     @staticmethod
     def _zip_add_file(zf, fs_path, arcname, st, report: CreateReport,
@@ -1618,7 +1670,12 @@ class NativeBackend:
         level_attribute = "compress_level" if hasattr(zi, "compress_level") else "_compresslevel"
         setattr(zi, level_attribute, zf.compresslevel)
         zi.file_size = st.st_size
-        with open(fs_path, "rb") as src, zf.open(zi, "w", force_zip64=st.st_size >= zipfile.ZIP64_LIMIT) as dst:
+        try:
+            source = open(fs_path, "rb")
+        except OSError as exc:
+            report.record_skip(fs_path, exc.strerror or str(exc))
+            return
+        with source as src, zf.open(zi, "w", force_zip64=st.st_size >= zipfile.ZIP64_LIMIT) as dst:
             while True:
                 buf = src.read(CHUNK_SIZE)
                 if not buf:
@@ -1627,6 +1684,7 @@ class NativeBackend:
                 progress.chunk(len(buf))
         report.files += 1
         report.bytes_in += st.st_size
+        report.included_inputs += 1
 
     # ------------------------------------------------------------------ #
     #  Extraction
@@ -1934,6 +1992,7 @@ class StreamBackend:
                 progress.chunk(len(buf))
                 report.bytes_in += len(buf)
         report.files += 1
+        report.included_inputs += 1
 
     def extract(self, archive_path, ctx: _ExtractContext, password=None) -> None:
         if password is not None:
@@ -2091,9 +2150,10 @@ class ArchiveEngine:
             return report
 
     @staticmethod
-    def _collect_items(sources, *, root, symlinks: str, archive_real: str):
+    def _collect_items(sources, *, root, symlinks: str, archive_real: str,
+                       skip_errors: list[CreateSkip] | None = None):
         items = list(_iter_items(sources, root=root, symlinks=symlinks,
-                                 archive_real=archive_real))
+                                 archive_real=archive_real, skip_errors=skip_errors))
         total_bytes = sum((p.stat().st_size if symlinks == "follow" and p.is_file()
                            else _file_size(p)) for p, _ in items)
         return items, total_bytes
@@ -2103,7 +2163,9 @@ class ArchiveEngine:
                root: str | os.PathLike[str] | None = None,
                compresslevel: int | None = None, symlinks: str = "store",
                progress: ProgressSink | None = None,
-               precollected: tuple[list[tuple[Path, str]], int] | None = None,
+               precollected: (tuple[list[tuple[Path, str]], int]
+                              | tuple[list[tuple[Path, str]], int, list[CreateSkip]]
+                              | None) = None,
                password=None) -> CreateReport:
         if symlinks not in ("store", "follow", "skip"):
             raise ValueError("symlinks must be 'store', 'follow' or 'skip'")
@@ -2118,28 +2180,73 @@ class ArchiveEngine:
             backend.validate_sources(sources, symlinks)
         archive_real = os.path.realpath(archive_path)
         with self._operation():
-            if precollected is not None:
-                items, total_bytes = precollected
-            else:
-                items, total_bytes = self._collect_items(
-                    sources, root=root, symlinks=symlinks, archive_real=archive_real)
-            archive_path.parent.mkdir(parents=True, exist_ok=True)
             report = CreateReport(archive=archive_path, format=fmt)
-            progress.start(total_bytes, len(items))
-            start = time.monotonic()
-            fd, tmp_name = tempfile.mkstemp(prefix=f".{archive_path.name}.", suffix=".part",
-                                            dir=str(archive_path.parent))
-            os.close(fd)
-            tmp_path = Path(tmp_name)
+            existing_output = os.path.lexists(archive_path)
+            try:
+                if precollected is not None:
+                    items, total_bytes = precollected[:2]
+                    if len(precollected) == 3:
+                        report.skip_errors.extend(precollected[2])
+                else:
+                    items, total_bytes = self._collect_items(
+                        sources, root=root, symlinks=symlinks, archive_real=archive_real,
+                        skip_errors=report.skip_errors)
+                report.accidental_skips = len(report.skip_errors)
+                archive_path.parent.mkdir(parents=True, exist_ok=True)
+                progress.start(total_bytes, len(items))
+                start = time.monotonic()
+                fd, tmp_name = tempfile.mkstemp(prefix=f".{archive_path.name}.", suffix=".part",
+                                                dir=str(archive_path.parent))
+                os.close(fd)
+                tmp_path = Path(tmp_name)
+            except Exception as exc:
+                report.accidental_skips = len(report.skip_errors)
+                if report.accidental_skips:
+                    raise CreateError(str(exc), report, preserved_existing=existing_output) from exc
+                raise
             try:
                 backend.create(tmp_path, items, fmt, compresslevel, symlinks,
                                report, progress, password=password)
-                os.replace(tmp_path, archive_path)
-            except BaseException:
+                if report.accidental_skips:
+                    if not report.included_inputs:
+                        raise CreateError(
+                            f"cannot create archive {archive_path}: no inputs could be included; "
+                            "inputs were skipped because of an error; no archive was created", report,
+                            preserved_existing=existing_output,
+                        )
+                    if os.path.lexists(archive_path):
+                        raise CreateError(
+                            f"cannot replace archive {archive_path}: inputs were skipped "
+                            "because of an error; the existing archive was preserved", report,
+                            preserved_existing=True,
+                        )
+                    try:
+                        # Link publication is exclusive: an output appearing
+                        # after the existence check must also be preserved.
+                        os.link(tmp_path, archive_path)
+                    except FileExistsError as exc:
+                        raise CreateError(
+                            f"cannot replace archive {archive_path}: inputs were skipped "
+                            "because of an error; the existing archive was preserved", report,
+                            preserved_existing=True,
+                        ) from exc
+                    try:
+                        tmp_path.unlink()
+                    except OSError as exc:
+                        report.cleanup_warning = (
+                            f"could not remove temporary archive {tmp_path}: {exc.strerror or str(exc)}"
+                        )
+                else:
+                    os.replace(tmp_path, archive_path)
+            except BaseException as exc:
                 try:
                     tmp_path.unlink(missing_ok=True)
                 except OSError:
                     pass
+                if report.accidental_skips and isinstance(exc, Exception) and not isinstance(exc, CreateError):
+                    raise CreateError(
+                        str(exc), report, preserved_existing=existing_output,
+                    ) from exc
                 raise
             report.elapsed = time.monotonic() - start
             report.entries = report.files + report.directories + report.symlinks

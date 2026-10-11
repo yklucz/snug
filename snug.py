@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from snug_update import AutomaticCheck
 
 from snug_core import (
-    ArchiveEngine, ArchiveEntry, ArchiveError, ArchiveFormat, CreateReport,
+    ArchiveEngine, ArchiveEntry, ArchiveError, ArchiveFormat, CreateError, CreateReport, CreateSkip,
     ExtractReport, TestReport, ExtractionLimits, ResourceLimitError, parse_size,
     FormatError, NativeBackend, NullProgress, ProgressDisplay,
     ProgressSink, StreamBackend, UnsafeArchiveError, __version__,
@@ -62,7 +62,8 @@ class _PromptAction(Exception):
         self.text = text
 
 
-class _TerminalEOF(KeyboardInterrupt):
+# Raw EOF must bypass ordinary exception handlers and retain interruption semantics.
+class _TerminalEOF(KeyboardInterrupt):  # NOSONAR(S5709)
     """Distinguish raw-reader EOF while preserving screen interruption rules."""
 
 
@@ -102,6 +103,25 @@ class Screen(Protocol):
     def handle(self, key: str) -> "Screen | _ExitMarker | None": ...
 
 
+def _draw_current_screen(screen: Screen, size: tuple[int, int], small: bool) -> None:
+    if small:
+        _draw_lines(_too_small_lines(), size=size)
+    else:
+        cols, rows = size
+        _draw_lines(screen.draw(cols, rows), footer=screen.footer(), size=size)
+
+
+def _read_screen_key(screen: Screen) -> str | None:
+    try:
+        return _read_key_timeout(0.1)
+    except _TerminalEOF:
+        raise
+    except KeyboardInterrupt:
+        if not getattr(screen, "cancel_on_interrupt", False):
+            raise
+        return "esc"
+
+
 def _run_screen(initial: Screen) -> None:
     """Own raw mode, redraw, and key reading for one screen loop.
 
@@ -117,20 +137,10 @@ def _run_screen(initial: Screen) -> None:
             size = (cols, rows)
             small = _size_mode(cols, rows) == "small"
             if redraw or size != drawn_size:
-                if small:
-                    _draw_lines(_too_small_lines(), size=size)
-                else:
-                    _draw_lines(screen.draw(cols, rows), footer=screen.footer(), size=size)
+                _draw_current_screen(screen, size, small)
                 drawn_size = size
                 redraw = False
-            try:
-                key = _read_key_timeout(0.1)
-            except _TerminalEOF:
-                raise
-            except KeyboardInterrupt:
-                if not getattr(screen, "cancel_on_interrupt", False):
-                    raise
-                key = "esc"
+            key = _read_screen_key(screen)
             if key is None:
                 continue
             # A resize may arrive during the input poll; gate the key against
@@ -276,16 +286,34 @@ def _unix_byte_ready(fd: int, timeout: float) -> bool:
     return bool(select.select([fd], [], [], timeout)[0])
 
 
+def _utf8_key_length(value: int) -> int:
+    if 0xC2 <= value <= 0xDF:
+        return 2
+    if 0xE0 <= value <= 0xEF:
+        return 3
+    if 0xF0 <= value <= 0xF4:
+        return 4
+    return 0
+
+
+def _read_utf8_continuation(fd: int) -> bytes | None:
+    if not _unix_byte_ready(fd, 0.05):
+        return None
+    continuation = _read_unix_byte(fd)
+    if not continuation:
+        return None
+    if continuation == b"\x03":
+        raise KeyboardInterrupt
+    if not 0x80 <= continuation[0] <= 0xBF:
+        _UNIX_KEY_PUSHBACK.appendleft(continuation)
+        return None
+    return continuation
+
+
 def _read_utf8_key(fd: int, lead: bytes) -> str:
     """Read one UTF-8 character, with bounded waits for its continuation bytes."""
-    value = lead[0]
-    if 0xC2 <= value <= 0xDF:
-        length = 2
-    elif 0xE0 <= value <= 0xEF:
-        length = 3
-    elif 0xF0 <= value <= 0xF4:
-        length = 4
-    else:
+    length = _utf8_key_length(lead[0])
+    if not length:
         return "other"
 
     decoder = codecs.getincrementaldecoder("utf-8")("strict")
@@ -293,15 +321,8 @@ def _read_utf8_key(fd: int, lead: bytes) -> str:
         decoder.decode(lead)
         character = ""
         for index in range(length - 1):
-            if not _unix_byte_ready(fd, 0.05):
-                return "other"
-            continuation = _read_unix_byte(fd)
-            if not continuation:
-                return "other"
-            if continuation == b"\x03":
-                raise KeyboardInterrupt
-            if not 0x80 <= continuation[0] <= 0xBF:
-                _UNIX_KEY_PUSHBACK.appendleft(continuation)
+            continuation = _read_utf8_continuation(fd)
+            if continuation is None:
                 return "other"
             character = decoder.decode(continuation, final=index == length - 2)
     except UnicodeDecodeError:
@@ -331,6 +352,20 @@ def _read_key_unix() -> str:
     return _decode_simple_char(b)
 
 
+def _decode_arrow_final(introducer: bytes, parameters: bytearray, final: bytes) -> str:
+    if final == b"~" and introducer == b"[":
+        return {b"1": "home", b"7": "home", b"4": "end", b"8": "end",
+                b"3": "delete"}.get(bytes(parameters).split(b";")[0], "other")
+    return {
+        b"A": "up",
+        b"B": "down",
+        b"C": "right",
+        b"D": "left",
+        b"H": "home",
+        b"F": "end",
+    }.get(final, "other")
+
+
 def _read_arrow_sequence(fd: int) -> str:
     """Decode an ANSI escape sequence and consume it completely."""
     if not _unix_byte_ready(fd, 0.05):
@@ -351,17 +386,7 @@ def _read_arrow_sequence(fd: int) -> str:
         if b == b"\x03":
             raise KeyboardInterrupt
         if 0x40 <= b[0] <= 0x7E:
-            if b == b"~" and introducer == b"[":
-                return {b"1": "home", b"7": "home", b"4": "end", b"8": "end",
-                        b"3": "delete"}.get(bytes(parameters).split(b";")[0], "other")
-            return {
-                b"A": "up",
-                b"B": "down",
-                b"C": "right",
-                b"D": "left",
-                b"H": "home",
-                b"F": "end",
-            }.get(b, "other")
+            return _decode_arrow_final(introducer, parameters, b)
         parameters.extend(b)
 
 
@@ -653,9 +678,14 @@ def _menu_result_output():
         yield
         return
     output = io.StringIO()
+    completed = False
     with redirect_stdout(output), redirect_stderr(output):
-        yield
-    _TUI_LAST_LINES[:] = output.getvalue().splitlines()
+        try:
+            yield
+            completed = True
+        finally:
+            if completed:
+                _TUI_LAST_LINES[:] = output.getvalue().splitlines()
 
 
 def _wait_for_enter() -> None:
@@ -1134,14 +1164,16 @@ class _EnumState:
 def _enumerate_worker(
     sources, root, symlinks, archive_real,
     q: "queue.Queue[tuple]", cancel: threading.Event, box: list,
+    skip_errors: list[CreateSkip] | None = None,
 ) -> None:
     """Run in a worker thread; feed ``(kind, ...)`` messages into ``q``."""
     try:
         items: list[tuple[Path, str]] = []
         total = 0
+        skip_errors = [] if skip_errors is None else skip_errors
         for fs_path, name in _iter_items(
             sources, root=root, symlinks=symlinks,
-            archive_real=archive_real, cancel=cancel,
+            archive_real=archive_real, cancel=cancel, skip_errors=skip_errors,
         ):
             items.append((fs_path, name))
             total += _file_size(fs_path)
@@ -1149,7 +1181,7 @@ def _enumerate_worker(
         if cancel.is_set():
             q.put(("cancelled",))
         else:
-            box[0] = (items, total)
+            box[0] = (items, total, skip_errors) if skip_errors else (items, total)
             q.put(("done",))
     except Exception as exc:
         box[0] = exc
@@ -1193,16 +1225,20 @@ def _spinner_loop(q: "queue.Queue[tuple]", state: _EnumState) -> bool:
             sys.stdout.flush()
 
 
-def _interactive_enumerate(sources, *, root, symlinks, archive_real):
+def _interactive_enumerate(sources, *, root, symlinks, archive_real,
+                           skip_errors: list[CreateSkip] | None = None):
     """Walk the tree in a worker thread, showing a spinner.
 
-    Returns ``(items, total_bytes)`` on success, or ``None`` if the user
-    cancelled with Esc, q, or Ctrl+C.
+    Returns collected items, byte total, and any skip diagnostics, or
+    ``None`` if the user cancelled with Esc, q, or Ctrl+C.
     """
+    skip_errors = [] if skip_errors is None else skip_errors
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        return ArchiveEngine._collect_items(
+        items, total = ArchiveEngine._collect_items(
             sources, root=root, symlinks=symlinks, archive_real=archive_real,
+            skip_errors=skip_errors,
         )
+        return (items, total, skip_errors) if skip_errors else (items, total)
 
     q: "queue.Queue[tuple]" = queue.Queue()
     cancel = threading.Event()
@@ -1210,7 +1246,7 @@ def _interactive_enumerate(sources, *, root, symlinks, archive_real):
 
     t = threading.Thread(
         target=_enumerate_worker,
-        args=(sources, root, symlinks, archive_real, q, cancel, box),
+        args=(sources, root, symlinks, archive_real, q, cancel, box, skip_errors),
         daemon=True,
     )
     t.start()
@@ -1273,14 +1309,20 @@ class _LineEditor:
         boundaries = _edit_boundaries(self.buffer)
         previous = max((pos for pos in boundaries if pos < self.cursor), default=0)
         following = min((pos for pos in boundaries if pos > self.cursor), default=len(self.buffer))
-        if key in ("home", "ctrl_a"):
-            self.cursor = 0
-        elif key in ("end", "ctrl_e"):
-            self.cursor = len(self.buffer)
-        elif key == "left":
-            self.cursor = previous
-        elif key == "right":
-            self.cursor = following
+        if self._edit_key(key, boundaries, previous, following):
+            return None
+        if key in ("up", "down"):
+            self._recall_history(key)
+        else:
+            self._insert_text(key)
+        return None
+
+    def _edit_key(self, key: str, boundaries: list[int], previous: int,
+                  following: int) -> bool:
+        positions = {"home": 0, "ctrl_a": 0, "end": len(self.buffer),
+                     "ctrl_e": len(self.buffer), "left": previous, "right": following}
+        if key in positions:
+            self.cursor = positions[key]
         elif key == "backspace":
             self.buffer = self.buffer[:previous] + self.buffer[self.cursor:]
             self.cursor = previous
@@ -1292,35 +1334,42 @@ class _LineEditor:
             self.buffer = self.buffer[self.cursor:]
             self.cursor = 0
         elif key == "ctrl_w":
-            position = boundaries.index(self.cursor)
-            while position and self.buffer[boundaries[position - 1]:boundaries[position]].isspace():
-                position -= 1
-            while position and not self.buffer[boundaries[position - 1]:boundaries[position]].isspace():
-                position -= 1
-            start = boundaries[position]
-            self.buffer = self.buffer[:start] + self.buffer[self.cursor:]
-            self.cursor = start
-        elif key in ("up", "down"):
-            if key == "up" and self.history_position:
-                if self.history_position == len(self.history):
-                    self._draft = (self.buffer, self.cursor)
-                self.history_position -= 1
+            self._delete_word(boundaries)
+        else:
+            return False
+        return True
+
+    def _delete_word(self, boundaries: list[int]) -> None:
+        position = boundaries.index(self.cursor)
+        while position and self.buffer[boundaries[position - 1]:boundaries[position]].isspace():
+            position -= 1
+        while position and not self.buffer[boundaries[position - 1]:boundaries[position]].isspace():
+            position -= 1
+        start = boundaries[position]
+        self.buffer = self.buffer[:start] + self.buffer[self.cursor:]
+        self.cursor = start
+
+    def _recall_history(self, key: str) -> None:
+        if key == "up" and self.history_position:
+            if self.history_position == len(self.history):
+                self._draft = (self.buffer, self.cursor)
+            self.history_position -= 1
+            self.buffer = self.history[self.history_position]
+            self.cursor = len(self.buffer)
+        elif key == "down" and self.history_position < len(self.history):
+            self.history_position += 1
+            if self.history_position == len(self.history):
+                self.buffer, self.cursor = self._draft
+            else:
                 self.buffer = self.history[self.history_position]
                 self.cursor = len(self.buffer)
-            elif key == "down" and self.history_position < len(self.history):
-                self.history_position += 1
-                if self.history_position == len(self.history):
-                    self.buffer, self.cursor = self._draft
-                else:
-                    self.buffer = self.history[self.history_position]
-                    self.cursor = len(self.buffer)
-        else:
-            text = " " if key == "space" else key
-            if len(text) == 1 and (text.isprintable() or text in ("\u200c", "\u200d")):
-                self.buffer = self.buffer[:self.cursor] + text + self.buffer[self.cursor:]
-                target = self.cursor + 1
-                self.cursor = next(pos for pos in _edit_boundaries(self.buffer) if pos >= target)
-        return None
+
+    def _insert_text(self, key: str) -> None:
+        text = " " if key == "space" else key
+        if len(text) == 1 and (text.isprintable() or text in ("\u200c", "\u200d")):
+            self.buffer = self.buffer[:self.cursor] + text + self.buffer[self.cursor:]
+            target = self.cursor + 1
+            self.cursor = next(pos for pos in _edit_boundaries(self.buffer) if pos >= target)
 
 
 def _editor_view(editor: _LineEditor, width: int) -> tuple[str, int]:
@@ -1342,12 +1391,38 @@ def _editor_view(editor: _LineEditor, width: int) -> tuple[str, int]:
     return "".join(units[start:end]), cursor_cells
 
 
+def _install_prompt_signals(saved, interrupt) -> None:
+    if threading.current_thread() is not threading.main_thread():
+        return
+    for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        previous = signal.getsignal(signum)
+        if previous == signal.SIG_IGN:
+            continue
+        saved[signum] = previous
+        signal.signal(signum, interrupt)
+
+
+def _forward_prompt_signal(interrupted, saved) -> None:
+    signum, frame = interrupted.args
+    previous = saved[signum]
+    if callable(previous):
+        previous(signum, frame)
+        return
+    if signum == signal.SIGINT:
+        raise KeyboardInterrupt
+    raise SystemExit(128 + signum)
+
+
 @contextmanager
 def _prompt_signals():
     """Unwind raw mode before catchable termination signals leave a prompt."""
     saved = {}
 
-    class Interrupted(BaseException):
+    # Signal unwinding must bypass ordinary exception handlers before restoring raw mode.
+    class Interrupted(BaseException):  # NOSONAR(S5709)
         pass
 
     def interrupt(signum, frame):
@@ -1356,29 +1431,15 @@ def _prompt_signals():
     interrupted = None
     try:
         try:
-            if threading.current_thread() is threading.main_thread():
-                for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"):
-                    signum = getattr(signal, name, None)
-                    if signum is not None:
-                        previous = signal.getsignal(signum)
-                        if previous != signal.SIG_IGN:
-                            saved[signum] = previous
-                            signal.signal(signum, interrupt)
+            _install_prompt_signals(saved, interrupt)
             yield
         except Interrupted as exc:
             interrupted = exc
     finally:
         for signum, previous in saved.items():
             signal.signal(signum, previous)
-    if interrupted is not None:
-        signum, frame = interrupted.args
-        previous = saved[signum]
-        if callable(previous):
-            previous(signum, frame)
-            return
-        if signum == signal.SIGINT:
-            raise KeyboardInterrupt
-        raise SystemExit(128 + signum)
+        if interrupted is not None:
+            _forward_prompt_signal(interrupted, saved)
 
 
 @contextmanager
@@ -1397,6 +1458,49 @@ _PROMPT_HISTORY: dict[str, list[str]] = {}
 _ARCHIVE_BROWSE_DIRECTORY: Path | None = None
 
 
+def _draw_editor(editor: _LineEditor, label: str, context: Sequence[str],
+                 hint: str | None, size: tuple[int, int]) -> None:
+    cols, rows = size
+    if _size_mode(*size) == "small":
+        _draw_lines(_too_small_lines(), size=size)
+        sys.stdout.write(_HIDE_CURSOR)
+    else:
+        visible, cursor = _editor_view(editor, cols - 3)
+        lines = list(context[:max(0, rows - 3)]) + [label, "> " + visible]
+        _draw_lines(lines, footer=[hint or "Enter: submit · Esc/Ctrl+C: cancel"], size=size)
+        sys.stdout.write(_cursor_at(len(lines), 3 + cursor, size=size) + _SHOW_CURSOR)
+    sys.stdout.flush()
+
+
+def _read_editor_key() -> str | None:
+    key = _read_key_timeout(0.1)
+    if key is None:
+        return None
+    # The shared reader pushes back a printable byte after ESC. Only a bare
+    # Escape cancels this editor; leave pending text intact.
+    if key == "esc" and _UNIX_KEY_PUSHBACK:
+        key = "other"
+    if _size_mode(*_term_size()) == "small" and key not in ("esc", "ctrl_d"):
+        return None
+    return key
+
+
+def _check_editor_action(editor: _LineEditor, action: str | None) -> None:
+    if action == "cancel":
+        raise _CancelPrompt()
+    if action == "eof":
+        raise EOFError()
+    if action is not None and action != "submit":
+        raise _PromptAction(action, editor.buffer)
+
+
+def _remember_editor_text(text: str, history_key: str) -> None:
+    if text:
+        history = _PROMPT_HISTORY.setdefault(history_key, [])
+        if not history or history[-1] != text:
+            history.append(text)
+
+
 def _edit_line(label: str, initial_text: str, context: Sequence[str], history_key: str,
                *, extra_keys: Mapping[str, str] | None = None, hint: str | None = None) -> str:
     editor = _LineEditor(initial_text, _PROMPT_HISTORY.get(history_key, ()), extra_keys or {})
@@ -1406,41 +1510,18 @@ def _edit_line(label: str, initial_text: str, context: Sequence[str], history_ke
         with _prompt_signals(), _prompt_raw_mode():
             while True:
                 size = _term_size()
-                cols, rows = size
                 if redraw or size != drawn_size:
-                    if _size_mode(*size) == "small":
-                        _draw_lines(_too_small_lines(), size=size)
-                        sys.stdout.write(_HIDE_CURSOR)
-                    else:
-                        visible, cursor = _editor_view(editor, cols - 3)
-                        lines = list(context[:max(0, rows - 3)]) + [label, "> " + visible]
-                        _draw_lines(lines, footer=[hint or "Enter: submit · Esc/Ctrl+C: cancel"], size=size)
-                        sys.stdout.write(_cursor_at(len(lines), 3 + cursor, size=size) + _SHOW_CURSOR)
-                    sys.stdout.flush()
+                    _draw_editor(editor, label, context, hint, size)
                     drawn_size = size
                     redraw = False
-                key = _read_key_timeout(0.1)
+                key = _read_editor_key()
                 if key is None:
                     continue
-                # The shared reader pushes back a printable byte after ESC. Only
-                # a bare Escape cancels this editor; leave pending text intact.
-                if key == "esc" and _UNIX_KEY_PUSHBACK:
-                    key = "other"
-                if _size_mode(*_term_size()) == "small" and key not in ("esc", "ctrl_d"):
-                    continue
                 action = editor.handle(key)
-                if action == "cancel":
-                    raise _CancelPrompt()
-                if action == "eof":
-                    raise EOFError()
+                _check_editor_action(editor, action)
                 if action == "submit":
-                    if editor.buffer:
-                        history = _PROMPT_HISTORY.setdefault(history_key, [])
-                        if not history or history[-1] != editor.buffer:
-                            history.append(editor.buffer)
+                    _remember_editor_text(editor.buffer, history_key)
                     return editor.buffer
-                if action is not None:
-                    raise _PromptAction(action, editor.buffer)
                 redraw = True
         # A previously installed signal handler may return normally. Resume
         # editing the same buffer and cursor after it runs in restored mode.
@@ -1559,6 +1640,15 @@ def _archive_browse_start(raw: str) -> Path:
     return Path.cwd()
 
 
+def _prompt_manual_archive_path(initial_text: str, context: Sequence[str]) -> str:
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        return _prompt("Archive path", preserve_spaces=True,
+                       initial_text=initial_text, context=context,
+                       extra_keys={"confirm": "browse"},
+                       hint="Enter OK · Tab Browse · Esc/Ctrl+C Back")
+    return _prompt("Archive path", preserve_spaces=True)
+
+
 def _handle_manual_path() -> Path | None:
     _clear_screen()
     print()
@@ -1566,13 +1656,7 @@ def _handle_manual_path() -> Path | None:
     context: list[str] = []
     while True:
         try:
-            if sys.stdin.isatty() and sys.stdout.isatty():
-                raw = _prompt("Archive path", preserve_spaces=True,
-                              initial_text=initial_text, context=context,
-                              extra_keys={"confirm": "browse"},
-                              hint="Enter OK · Tab Browse · Esc/Ctrl+C Back")
-            else:
-                raw = _prompt("Archive path", preserve_spaces=True)
+            raw = _prompt_manual_archive_path(initial_text, context)
         except _CancelPrompt:
             return None
         except _PromptAction as action:
@@ -1680,18 +1764,21 @@ def _menu_format_path(path: Path, fmt: ArchiveFormat) -> Path:
     return path.with_name(name + "." + fmt.value)
 
 
+def _prompt_compression_level(current: int | None, context: Sequence[str], *, tty: bool) -> str:
+    default = "default" if current is None else str(current)
+    if tty:
+        return _prompt("Compression (0-9/default)", default, context=context,
+                       history_key="Compression level (0-9 or default)")
+    return _prompt("Compression level (0-9 or default)", default)
+
+
 def _menu_compression(current: int | None) -> int | None:
     _clear_screen()
     context: list[str] = []
     while True:
         try:
             tty = sys.stdin.isatty() and sys.stdout.isatty()
-            default = "default" if current is None else str(current)
-            if tty:
-                raw = _prompt("Compression (0-9/default)", default, context=context,
-                              history_key="Compression level (0-9 or default)")
-            else:
-                raw = _prompt("Compression level (0-9 or default)", default)
+            raw = _prompt_compression_level(current, context, tty=tty)
         except _CancelPrompt:
             return current
         if raw.lower() == "default":
@@ -1853,6 +1940,38 @@ def _print_menu_skipped(names: Sequence[str]) -> None:
         print(f"  skipped: {_safe(name)}", file=sys.stderr)
 
 
+def _create_diagnostic_text(value, password: str | None) -> str:
+    text = str(value)
+    return _safe(text.replace(password, "[redacted]") if password else text)
+
+
+def _print_create_skips(report: CreateReport, *, password: str | None = None) -> None:
+    for skipped in report.skip_errors[:20]:
+        path = _create_diagnostic_text(skipped.path, password)
+        reason = _create_diagnostic_text(skipped.reason, password)
+        print(f"warning: skipped {path}: {reason}", file=sys.stderr)
+    if report.accidental_skips > 20:
+        print(f"warning: {report.accidental_skips - 20} more inputs skipped "
+              f"({report.accidental_skips} total)", file=sys.stderr)
+    if report.cleanup_warning:
+        print(f"warning: {_create_diagnostic_text(report.cleanup_warning, password)}", file=sys.stderr)
+
+
+def _print_create_counts(report: CreateReport) -> None:
+    print(f"  {report.included_inputs} included, {report.accidental_skips} skipped.")
+
+
+def _print_menu_create_error(exc: CreateError, password: str | None) -> None:
+    _clear_screen()
+    with _menu_result_output():
+        print()
+        print("  error: existing archive preserved." if exc.preserved_existing
+              else "  error: archive was not created.")
+        _print_create_counts(exc.report)
+        _print_create_skips(exc.report, password=password)
+        print(f"  {_create_diagnostic_text(exc, password)}")
+
+
 def _menu_create(engine: ArchiveEngine) -> None:
     cwd = Path.cwd()
     sources = _select_sources_arrow(cwd)
@@ -1872,17 +1991,29 @@ def _menu_create(engine: ArchiveEngine) -> None:
     _clear_screen()
     print()
     archive_real = os.path.realpath(options.archive_path)
+    skip_errors: list[CreateSkip] = []
     try:
         precollected = _interactive_enumerate(
             options.sources,
             root=cwd,
             symlinks=options.symlinks,
             archive_real=archive_real,
+            skip_errors=skip_errors,
         )
     except KeyboardInterrupt:
         _clear_screen()
         with _menu_result_output():
             print(_CANCELLED_MESSAGE)
+        return
+    except Exception as exc:
+        if not skip_errors:
+            raise
+        report = CreateReport(options.archive_path, options.fmt,
+                              accidental_skips=len(skip_errors), skip_errors=skip_errors)
+        _print_menu_create_error(
+            CreateError(str(exc), report, preserved_existing=os.path.lexists(options.archive_path)),
+            options.password,
+        )
         return
     if precollected is None:
         _clear_screen()
@@ -1893,19 +2024,28 @@ def _menu_create(engine: ArchiveEngine) -> None:
     print()
     display = ProgressDisplay("create")
     with _menu_password_errors(options.password):
-        report = engine.create(
-            options.archive_path,
-            options.sources,
-            fmt=options.fmt,
-            root=cwd,
-            compresslevel=options.compresslevel,
-            symlinks=options.symlinks,
-            password=options.password,
-            progress=display,
-            precollected=precollected,
-        )
+        try:
+            report = engine.create(
+                options.archive_path,
+                options.sources,
+                fmt=options.fmt,
+                root=cwd,
+                compresslevel=options.compresslevel,
+                symlinks=options.symlinks,
+                password=options.password,
+                progress=display,
+                precollected=precollected,
+            )
+        except CreateError as exc:
+            _print_menu_create_error(exc, options.password)
+            return
     with _menu_result_output():
         print()
+        if report.accidental_skips:
+            print("  Archive is incomplete.")
+            _print_create_counts(report)
+            _print_create_skips(report, password=options.password)
+            print()
         _print_create_summary(report)
         _print_menu_skipped(report.skipped)
 
@@ -2151,16 +2291,7 @@ class _LimitsScreen(_MenuScreen):
         return None
 
 
-def _menu_limits(current: ExtractionLimits) -> ExtractionLimits:
-    if sys.stdin.isatty() and sys.stdout.isatty():
-        screen = _LimitsScreen(current)
-        try:
-            _run_screen(screen)
-        except _TerminalEOF as exc:
-            if screen.editing is not None:
-                raise _QuitInteractive() from exc
-            raise
-        return screen.limits_result
+def _menu_limits_plain(current: ExtractionLimits) -> ExtractionLimits:
     entries, total, per_file, ratio = (current.max_entries, current.max_total_size,
                                       current.max_file_size, current.max_ratio)
     while True:
@@ -2183,6 +2314,19 @@ def _menu_limits(current: ExtractionLimits) -> ExtractionLimits:
             per_file = _menu_limit_value(per_file, parse_size)
         elif choice == "r":
             ratio = _menu_limit_value(ratio, _parse_ratio)
+
+
+def _menu_limits(current: ExtractionLimits) -> ExtractionLimits:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return _menu_limits_plain(current)
+    screen = _LimitsScreen(current)
+    try:
+        _run_screen(screen)
+    except _TerminalEOF as exc:
+        if screen.editing is not None:
+            raise _QuitInteractive() from exc
+        raise
+    return screen.limits_result
 
 
 @dataclass
@@ -2664,28 +2808,38 @@ def _print_entry_verbose(entry: ArchiveEntry) -> None:
 
 # -- per-command handlers --------------------------------------------------- #
 
-def _cmd_create(args, engine: ArchiveEngine) -> None:
+def _cmd_create(args, engine: ArchiveEngine) -> int:
     archive_path = Path(args.archive)
     if archive_path.exists() and not args.force:
         raise ArchiveError(
             f"archive already exists: {archive_path} (use --force to replace it)"
         )
     display = ProgressDisplay("create", quiet=args.quiet)
-    report = engine.create(
-        args.archive,
-        args.sources,
-        fmt=args.format,
-        root=args.root,
-        compresslevel=args.level,
-        symlinks=args.symlinks,
-        progress=display,
-        password=_read_password(args),
-    )
-    if args.quiet:
-        return
-    _print_create_summary(report)
-    for name in report.skipped:
-        print(f"  skipped: {_safe(name)}", file=sys.stderr)
+    password = _read_password(args)
+    try:
+        report = engine.create(
+            args.archive,
+            args.sources,
+            fmt=args.format,
+            root=args.root,
+            compresslevel=args.level,
+            symlinks=args.symlinks,
+            progress=display,
+            password=password,
+        )
+    except CreateError as exc:
+        _print_create_skips(exc.report, password=password)
+        raise
+    _print_create_skips(report, password=password)
+    if not args.quiet:
+        _print_create_summary(report)
+        for name in report.skipped:
+            print(f"  skipped: {_safe(name)}", file=sys.stderr)
+    if report.accidental_skips:
+        print(f"warning: archive is incomplete: {report.included_inputs} included, "
+              f"{report.accidental_skips} skipped", file=sys.stderr)
+        return 5
+    return 0
 
 
 def _cmd_extract(args, engine: ArchiveEngine) -> None:
@@ -3244,7 +3398,7 @@ def _run_archive_command(args) -> int:
     }
 
     try:
-        dispatch[args.command](args, engine)
+        status = dispatch[args.command](args, engine)
     except ResourceLimitError as exc:
         print(f"error: {_safe(exc)}", file=sys.stderr)
         return 4
@@ -3262,9 +3416,9 @@ def _run_archive_command(args) -> int:
         print(_INTERRUPTED_MESSAGE, file=sys.stderr)
         return 130
 
-    if args.command in {"create", "extract"} and not args.quiet:
+    if status in (None, 0) and args.command in {"create", "extract"} and not args.quiet:
         _update_notice(handle)
-    return 0
+    return 0 if status is None else status
 
 
 def main(argv: Sequence[str] | None = None) -> int:
