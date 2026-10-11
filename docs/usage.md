@@ -326,6 +326,8 @@ snug formats --json
 
 Both JSON reports use `schema_version: 1`. Doctor exposes `ok`, `snug_version`, `python`, `platform`, `backends`, `runtime`, and `updater`. Formats exposes `formats` rows with `format`, `read`, `write`, `read_backends`, `write_backends`, `status`, and `details`, plus a capability note. JSON is available only for these diagnostics.
 
+Invalid arguments and operational diagnostic errors produce plain text on stderr and leave stdout empty. They do not produce a JSON error object. An unhealthy `doctor --json` report still uses schema 1, includes `ok: false`, and returns status 2.
+
 ## Passwords
 
 `create`, `extract`, `list`, `info`, and `test` accept either `--password` or `--password-file FILE`; the options are mutually exclusive. `--password` takes no value and prompts securely:
@@ -368,7 +370,11 @@ Checks report the latest stable release; only `snug update` requests installatio
 | `2` | Invalid CLI arguments, an archive/format/I/O error, or unhealthy required components reported by `doctor`. |
 | `3` | Extraction or integrity testing rejected an unsafe archive. |
 | `4` | An explicit extraction resource limit was exceeded. |
-| `5` | An archive was created but is incomplete because inputs were skipped due to errors. [snug.py:2753](../snug.py#L2753). |
-| `130` | Command interrupted. In the TUI, main-menu, secure-password or archive-operation interruptions can exit with 130; screen cancellation follows the rules above. [snug.py:2492](../snug.py#L2492), [snug.py:2519](../snug.py#L2519), [snug.py:3330](../snug.py#L3330). |
+| `5` | An archive was created but is incomplete because inputs were skipped due to errors. [snug.py:3094](../snug.py#L3094). |
+| `130` | Command interrupted. In the TUI, main-menu, secure-password or archive-operation interruptions can exit with 130; screen cancellation follows the rules above. [snug.py:2577](../snug.py#L2577), [snug.py:2604](../snug.py#L2604), [snug.py:3692](../snug.py#L3692). |
+
+Archive command errors start with `error:` on stderr. They identify the archive and the file or member when available. They state the cause and give a next step where one is clear. Interrupted operations return status 130. Active progress ends before an error or interruption message.
+
+If the stdout consumer closes its pipe early, `list`, `info`, `formats`, and `doctor` exit 0 silently. A closed consumer may receive only part of the output, including a JSON report. If stderr closes during create, extract, or test progress, Snug disables progress and continues the operation with its normal result and exit status. Progress uses no ANSI controls when stderr is not a terminal.
 
 For error messages and fixes, see [Troubleshooting](troubleshooting.md).

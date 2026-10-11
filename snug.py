@@ -2721,6 +2721,72 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _CliProgressDisplay(ProgressDisplay):
+    """Keep CLI diagnostics separate from an unfinished progress line."""
+
+    def __init__(self, operation: str, quiet: bool = False, stream=None) -> None:
+        super().__init__(operation, quiet=quiet, stream=stream)
+        self._line_open = False
+
+    def _closed_pipe(self) -> None:
+        self.quiet = True
+        self._line_open = False
+        _silence_closed_pipe(self.stream)
+
+    def _render(self, force: bool = False, final: bool = False) -> None:
+        previous = self._last_render
+        if self.tty and not self.quiet and force:
+            self._line_open = True
+        try:
+            super()._render(force=force, final=final)
+        except BrokenPipeError:
+            self._closed_pipe()
+        else:
+            if self.tty and not self.quiet and (force or self._last_render != previous):
+                self._line_open = not final
+
+    def abort(self) -> None:
+        if not self._line_open:
+            return
+        self._line_open = False
+        try:
+            self.stream.write("\n")
+            self.stream.flush()
+        except BrokenPipeError:
+            self._closed_pipe()
+
+
+def _silence_closed_pipe(stream) -> None:
+    """Keep later buffered flushes away from a closed consumer."""
+    try:
+        descriptor = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        replacement = open(os.devnull, "w")
+        if stream is sys.stdout:
+            sys.stdout = replacement
+        elif stream is sys.stderr:
+            sys.stderr = replacement
+        else:
+            replacement.close()
+        return
+    null_descriptor = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(null_descriptor, descriptor)
+    finally:
+        os.close(null_descriptor)
+
+
+def _run_with_closed_stdout(action: Callable[[], int]) -> int:
+    """Treat an early-closing report consumer as a successful command."""
+    try:
+        status = action()
+        sys.stdout.flush()
+        return status
+    except BrokenPipeError:
+        _silence_closed_pipe(sys.stdout)
+        return 0
+
+
 def _read_password(args) -> str | None:
     if args.password_file is not None:
         # Strip only the final line ending; spaces can be part of a password.
@@ -2744,6 +2810,189 @@ def _read_password(args) -> str | None:
                     "cannot securely prompt here; use --password-file"
                 ) from exc
     return None
+
+
+def _cli_exception_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    while id(exc) not in seen:
+        seen.add(id(exc))
+        chain.append(exc)
+        if exc.__cause__ is None:
+            break
+        exc = exc.__cause__
+    return chain
+
+
+def _cli_error_context(args, member: str = "", *, output: bool = False) -> str:
+    context = f"archive {str(args.archive)!r}"
+    if output and args.command == "extract":
+        context += f", destination {str(args.directory)!r}"
+    if member:
+        context += f", member {member!r}"
+    return context
+
+
+def _cli_same_path(left, right) -> bool:
+    if left is None or right is None:
+        return False
+    return os.path.abspath(os.fspath(left)) == os.path.abspath(os.fspath(right))
+
+
+def _cli_create_input_path(args, filename) -> bool:
+    if filename is None or _cli_same_path(filename, Path(args.archive).parent):
+        return False
+    source_path = os.path.abspath(os.fspath(filename))
+    for source in getattr(args, "sources", ()):
+        root = os.path.abspath(os.fspath(source))
+        try:
+            if os.path.commonpath((source_path, root)) == root:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _cli_os_context(args, exc: OSError, member: str) -> tuple[str, bool]:
+    password_file = getattr(args, "password_file", None)
+    filename = exc.filename
+    input_file = _cli_same_path(filename, args.archive)
+    password_error = _cli_same_path(filename, password_file)
+    source_error = args.command == "create" and _cli_create_input_path(args, filename)
+    output = args.command in {"create", "extract"} and not (input_file or password_error or source_error)
+    context = _cli_error_context(args, member, output=output)
+    if password_error:
+        context += f", password file {str(password_file)!r}"
+    elif source_error:
+        context += f", file {str(filename)!r}"
+    return context, output
+
+
+def _cli_os_reason(exc: OSError, *, output: bool) -> str:
+    import errno
+
+    if exc.errno in (errno.EACCES, errno.EPERM):
+        advice = "choose a writable destination" if output else "check the file permissions"
+        return f"permission denied; {advice}"
+    messages = {
+        errno.ENOSPC: "no space left on the device; free space or choose another destination",
+        errno.ENAMETOOLONG: "file name or path is too long; use a shorter name or destination path",
+        errno.ENOENT: "file or directory does not exist; check the path",
+        errno.ENOTDIR: "a path component is not a directory; choose a directory path",
+        errno.EISDIR: "the path is a directory; choose a file path",
+        errno.EROFS: "destination is read-only; choose a writable destination",
+    }
+    fallback = exc.strerror or "file operation failed; check the input and destination paths"
+    return fallback if exc.errno is None else messages.get(exc.errno, fallback)
+
+
+def _cli_os_error(args, exc: OSError, member: str) -> str:
+    context, output = _cli_os_context(args, exc, member)
+    return f"{context}: {_cli_os_reason(exc, output=output)}"
+
+
+def _cli_limit_advice(message: str) -> str:
+    if message.startswith("archive contains "):
+        return "extract fewer members or adjust --max-files"
+    limit = message.rsplit(" exceeds ", 1)[-1]
+    if limit.startswith("file limit "):
+        return "extract fewer members or adjust --max-file-size"
+    if limit.startswith("compression ratio limit "):
+        return "extract fewer members or adjust --max-ratio"
+    return "extract fewer members or adjust --max-size"
+
+
+def _cli_password_error(chain: Sequence[BaseException]) -> str | None:
+    for error in chain:
+        message = str(error)
+        if message.endswith("could not read 7z archive: incorrect password or corrupt archive"):
+            return "incorrect password or corrupt archive; check the password or obtain a complete copy"
+        if (message == "7z archive requires a password; use --password or --password-file"
+                or error.__class__.__name__ == "PasswordRequired"):
+            return "a password is required; use --password or --password-file"
+        if isinstance(error, RuntimeError):
+            if message.startswith("Bad password for file "):
+                return "incorrect password; check the password and try again"
+            if message.endswith("is encrypted, password required for extraction"):
+                return "a password is required; use --password or --password-file"
+    return None
+
+
+def _cli_truncated_error(chain: Sequence[BaseException]) -> bool:
+    for error in chain:
+        if isinstance(error, EOFError):
+            return True
+        message = str(error)
+        if isinstance(error, tarfile.ReadError) and message == "unexpected end of data":
+            return True
+        if message.startswith(("truncated archive member:", "truncated 7z member:",
+                               "truncated RAR5 archive header")):
+            return True
+        if message.startswith("TAR archive ") and message.endswith(" is truncated"):
+            return True
+    return False
+
+
+def _cli_corruption_error(chain: Sequence[BaseException]) -> str | None:
+    zip_errors = [error for error in chain if isinstance(error, zipfile.BadZipFile)]
+    if any(str(error).startswith("Bad CRC-32 for file ") for error in zip_errors) or any(
+            error.__class__.__name__ == "CrcError" for error in chain):
+        return "member data failed its integrity check; obtain a complete copy of the archive"
+    if zip_errors:
+        return "ZIP archive is corrupt or truncated; obtain a complete copy"
+    if _cli_truncated_error(chain):
+        return "archive is truncated; obtain a complete copy"
+    if any(isinstance(error, tarfile.ReadError) for error in chain):
+        return "TAR archive has an invalid header or is corrupt; obtain a complete copy"
+    return None
+
+
+def _cli_archive_error(args, exc: BaseException, member: str,
+                       chain: Sequence[BaseException]) -> str:
+    message = str(exc)
+    context = _cli_error_context(args, member)
+    if isinstance(exc, ResourceLimitError):
+        return f"{context}: {message}; {_cli_limit_advice(message)}"
+    if isinstance(exc, UnsafeArchiveError):
+        return f"{context}: {message}; use an archive with safe member paths and link targets"
+    if isinstance(exc, CreateError):
+        return f"{context}: {message}"
+    if isinstance(exc, FormatError):
+        return f"{context}: {message}; run snug formats to see installed formats"
+    if message.startswith("no such archive:"):
+        return f"{context}: archive file does not exist; check the path"
+    if message.startswith("no such file or directory:"):
+        return f"{context}: {message}; check the input path"
+    if message.startswith("archive already exists:"):
+        return f"{context}: {message}"
+    if message == "password file must contain exactly one line":
+        return f"{context}, password file {str(args.password_file)!r}: {message}; put one password on one line"
+    password_error = _cli_password_error(chain)
+    if password_error:
+        return f"{context}: {password_error}"
+    corruption_error = _cli_corruption_error(chain)
+    if corruption_error:
+        return f"{context}: {corruption_error}"
+    if "py7zr could not process" in message or "libarchive could not read" in message:
+        return f"{context}: archive could not be read; obtain a complete copy or check snug formats"
+    return f"{context}: {message}"
+
+
+def _cli_error_text(args, exc: BaseException, member: str = "") -> str:
+    """Format CLI failures without changing the shared engine or TUI text."""
+    chain = _cli_exception_chain(exc)
+    # CreateError carries publication and skipped-input facts that must survive.
+    create_policy_error = isinstance(exc, CreateError) and str(exc).startswith(
+        ("cannot create archive ", "cannot replace archive "))
+    if not create_policy_error:
+        for error in chain:
+            if isinstance(error, OSError) and error.errno is not None:
+                message = _cli_os_error(args, error, member)
+                if isinstance(exc, CreateError):
+                    message += ("; the existing archive was preserved" if exc.preserved_existing
+                                else "; no archive was created")
+                return _safe(message)
+    return _safe(_cli_archive_error(args, exc, member, chain))
 
 
 # -- summary printers ------------------------------------------------------- #
@@ -2814,19 +3063,23 @@ def _cmd_create(args, engine: ArchiveEngine) -> int:
         raise ArchiveError(
             f"archive already exists: {archive_path} (use --force to replace it)"
         )
-    display = ProgressDisplay("create", quiet=args.quiet)
+    display = _CliProgressDisplay("create", quiet=args.quiet)
+    args._cli_progress = display
     password = _read_password(args)
     try:
-        report = engine.create(
-            args.archive,
-            args.sources,
-            fmt=args.format,
-            root=args.root,
-            compresslevel=args.level,
-            symlinks=args.symlinks,
-            progress=display,
-            password=password,
-        )
+        try:
+            report = engine.create(
+                args.archive,
+                args.sources,
+                fmt=args.format,
+                root=args.root,
+                compresslevel=args.level,
+                symlinks=args.symlinks,
+                progress=display,
+                password=password,
+            )
+        finally:
+            display.abort()
     except CreateError as exc:
         _print_create_skips(exc.report, password=password)
         raise
@@ -2843,19 +3096,23 @@ def _cmd_create(args, engine: ArchiveEngine) -> int:
 
 
 def _cmd_extract(args, engine: ArchiveEngine) -> None:
-    display = ProgressDisplay("extract", quiet=args.quiet)
-    report = engine.extract(
-        args.archive,
-        args.directory,
-        members=args.member,
-        overwrite=not args.no_overwrite,
-        preserve_metadata=not args.no_metadata,
-        symlinks=args.symlinks,
-        strip_components=args.strip_components,
-        limits=ExtractionLimits(args.max_files, args.max_size, args.max_file_size, args.max_ratio),
-        progress=display,
-        password=_read_password(args),
-    )
+    display = _CliProgressDisplay("extract", quiet=args.quiet)
+    args._cli_progress = display
+    try:
+        report = engine.extract(
+            args.archive,
+            args.directory,
+            members=args.member,
+            overwrite=not args.no_overwrite,
+            preserve_metadata=not args.no_metadata,
+            symlinks=args.symlinks,
+            strip_components=args.strip_components,
+            limits=ExtractionLimits(args.max_files, args.max_size, args.max_file_size, args.max_ratio),
+            progress=display,
+            password=_read_password(args),
+        )
+    finally:
+        display.abort()
     if args.quiet:
         return
     _print_extract_summary(report)
@@ -2872,8 +3129,12 @@ def _cmd_list(args, engine: ArchiveEngine) -> None:
 
 
 def _cmd_test(args, engine: ArchiveEngine) -> None:
-    report = engine.test(args.archive, password=_read_password(args),
-                         progress=ProgressDisplay("test", quiet=args.quiet))
+    display = _CliProgressDisplay("test", quiet=args.quiet)
+    args._cli_progress = display
+    try:
+        report = engine.test(args.archive, password=_read_password(args), progress=display)
+    finally:
+        display.abort()
     if not args.quiet:
         _print_test_summary(report)
 
@@ -3373,16 +3634,38 @@ def _run_interactive_cli() -> int:
     return code
 
 
+def _emit_cli_stderr(message: str) -> None:
+    """A closed error consumer must not turn a failed report into success."""
+    try:
+        print(message, file=sys.stderr)
+    except BrokenPipeError:
+        _silence_closed_pipe(sys.stderr)
+        # Preserve the existing failed-error-write status, outside stdout policy.
+        raise SystemExit(1) from None
+
+
 def _run_diagnostic_command(args) -> int:
     dispatch = {"doctor": _cmd_doctor, "formats": _cmd_formats}
     try:
         return dispatch[args.command](args)
+    except BrokenPipeError:
+        raise
     except (ArchiveError, OSError, ValueError) as exc:
-        print(f"error: {_safe(exc)}", file=sys.stderr)
+        _emit_cli_stderr(f"error: {_safe(exc)}")
         return 2
     except KeyboardInterrupt:
-        print(_INTERRUPTED_MESSAGE, file=sys.stderr)
+        _emit_cli_stderr(_INTERRUPTED_MESSAGE)
         return 130
+
+
+def _report_cli_archive_error(args, exc: Exception) -> int:
+    display = getattr(args, "_cli_progress", None)
+    member = display.current if display is not None else ""
+    prefix = "unsafe archive: " if isinstance(exc, UnsafeArchiveError) else ""
+    _emit_cli_stderr(f"error: {prefix}{_cli_error_text(args, exc, member)}")
+    if isinstance(exc, ResourceLimitError):
+        return 4
+    return 3 if isinstance(exc, UnsafeArchiveError) else 2
 
 
 def _run_archive_command(args) -> int:
@@ -3399,21 +3682,13 @@ def _run_archive_command(args) -> int:
 
     try:
         status = dispatch[args.command](args, engine)
-    except ResourceLimitError as exc:
-        print(f"error: {_safe(exc)}", file=sys.stderr)
-        return 4
-    except UnsafeArchiveError as exc:
-        print(f"error: unsafe archive: {_safe(exc)}", file=sys.stderr)
-        return 3
-    except ArchiveError as exc:
-        print(f"error: {_safe(exc)}", file=sys.stderr)
-        return 2
-    except (OSError, zipfile.BadZipFile, tarfile.TarError, EOFError,
-            ValueError) as exc:
-        print(f"error: {_safe(exc)}", file=sys.stderr)
-        return 2
+    except (ArchiveError, OSError, zipfile.BadZipFile, tarfile.TarError,
+            EOFError, ValueError) as exc:
+        if isinstance(exc, BrokenPipeError) and args.command in {"list", "info"}:
+            raise
+        return _report_cli_archive_error(args, exc)
     except KeyboardInterrupt:
-        print(_INTERRUPTED_MESSAGE, file=sys.stderr)
+        _emit_cli_stderr(_INTERRUPTED_MESSAGE)
         return 130
 
     if status in (None, 0) and args.command in {"create", "extract"} and not args.quiet:
@@ -3429,7 +3704,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "update":
         return _cmd_update(args)
     if args.command in {"doctor", "formats"}:
-        return _run_diagnostic_command(args)
+        return _run_with_closed_stdout(lambda: _run_diagnostic_command(args))
+    if args.command in {"list", "info"}:
+        return _run_with_closed_stdout(lambda: _run_archive_command(args))
     return _run_archive_command(args)
 
 

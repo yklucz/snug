@@ -656,7 +656,7 @@ def test_cli_reports_collection_skip_even_when_creation_aborts_before_staging(
     if failure == "missing-source":
         assert str(missing) in captured.err and "no such file" in captured.err.lower()
     else:
-        assert "staging permission denied" in captured.err.lower()
+        assert "permission denied" in captured.err.lower()
     if existing:
         assert archive.read_bytes() == previous
     else:
