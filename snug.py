@@ -232,7 +232,7 @@ def _raw_mode(*, when: int | None = None):
 
 def _read_key() -> str:
     """Return one of: up, down, left, right, enter, esc, space, backspace,
-    home, end, delete, ctrl_a/e/d/k/u/w, confirm (Unix Tab), quit, or a character."""
+    home/end, page_up/down, delete, ctrl_a/e/d/k/u/w, confirm (Tab), quit, or a character."""
     if os.name == "nt":
         return _read_key_windows()
     return _read_key_unix()
@@ -256,6 +256,9 @@ def _read_key_windows() -> str:
 
 def _decode_extended_windows(getch) -> str:
     ch2 = getch()
+    paging = {b"I": "page_up", b"Q": "page_down", b"G": "home", b"O": "end"}
+    if ch2 in paging:
+        return paging[ch2]
     if ch2 == b"H":
         return "up"
     if ch2 == b"P":
@@ -355,7 +358,8 @@ def _read_key_unix() -> str:
 def _decode_arrow_final(introducer: bytes, parameters: bytearray, final: bytes) -> str:
     if final == b"~" and introducer == b"[":
         return {b"1": "home", b"7": "home", b"4": "end", b"8": "end",
-                b"3": "delete"}.get(bytes(parameters).split(b";")[0], "other")
+                b"3": "delete", b"5": "page_up", b"6": "page_down"}.get(
+                    bytes(parameters).split(b";")[0], "other")
     return {
         b"A": "up",
         b"B": "down",
@@ -645,30 +649,139 @@ def _select_menu(title: str, options: list[tuple[str, str]],
     return screen.result
 
 
+def _tui_clusters(text: str) -> list[str]:
+    """Keep zero-width marks attached to their preceding visible character."""
+    clusters: list[str] = []
+    for char in text:
+        if clusters and not _tui_char_width(char):
+            clusters[-1] += char
+        else:
+            clusters.append(char)
+    return clusters
+
+
+def _tui_middle(text: str, width: int) -> str:
+    """Shorten a path in the middle, giving its filename the larger budget."""
+    if _tui_cell_width(text) <= width:
+        return text
+    if width <= 1:
+        return "…" if width else ""
+    clusters = _tui_clusters(text)
+    head_budget = (width - 1) // 3
+    head: list[str] = []
+    while clusters and _tui_cell_width("".join(head) + clusters[0]) <= head_budget:
+        head.append(clusters.pop(0))
+    tail: list[str] = []
+    tail_budget = width - 1 - _tui_cell_width("".join(head))
+    while clusters and _tui_cell_width(clusters[-1] + "".join(tail)) <= tail_budget:
+        tail.insert(0, clusters.pop())
+    return "".join(head) + "…" + "".join(tail)
+
+
+def _tui_wrap_word(word: str, width: int) -> list[str]:
+    pieces = [""]
+    for cluster in _tui_clusters(word):
+        if pieces[-1] and _tui_cell_width(pieces[-1] + cluster) > width:
+            pieces.append("")
+        pieces[-1] += cluster
+    return pieces
+
+
+def _tui_wrap(text: str, width: int) -> list[str]:
+    """Wrap messages without dropping text or splitting combining marks."""
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        if current and _tui_cell_width(current + " " + word) <= width:
+            current += " " + word
+            continue
+        if current:
+            lines.append(current)
+        pieces = _tui_wrap_word(word, width)
+        lines.extend(pieces[:-1])
+        current = pieces[-1]
+    return lines + [current]
+
+
+_TUI_QUOTED_PATH = re.compile(
+    r"(['\"])((?![A-Za-z][A-Za-z0-9+.-]*://)[^'\"]*[\\/][^'\"]*)\1")
+_TUI_BARE_PATH = re.compile(r"(?<!\S)(?:/|[A-Za-z]:[\\/])[^\s'\"]+")
+
+
+def _tui_pause_paths(line: str, width: int) -> str:
+    """Recognize result paths and quoted filesystem diagnostics, not causes."""
+    budget = max(1, width - 10)
+    if line.startswith("warning: skipped "):
+        name, separator, cause = line[len("warning: skipped "):].partition(": ")
+        return "warning: skipped " + _tui_middle(name, budget) + separator + cause
+    if line.startswith(("Created ", "Tested ")) and "  [" in line:
+        prefix, path = line.split(" ", 1)
+        path, suffix = path.rsplit("  [", 1)
+        return prefix + " " + _tui_middle(path, budget) + "  [" + suffix
+    if line.startswith("Extracted ") and " items to " in line:
+        prefix, path = line.split(" items to ", 1)
+        return prefix + " items to " + _tui_middle(path, budget)
+    if line.startswith(("Output: ", "Archive: ", "skipped: ")):
+        prefix, path = line.split(": ", 1)
+        return prefix + ": " + _tui_middle(path, budget)
+    line = _TUI_QUOTED_PATH.sub(
+        lambda match: match[1] + _tui_middle(match[2], budget) + match[1], line)
+    return _TUI_BARE_PATH.sub(lambda match: _tui_middle(match[0], budget), line)
+
+
+def _tui_pause_lines(lines: list[str], width: int) -> list[str]:
+    plain = [_TUI_SGR.sub("", line).strip() for line in lines]
+    while plain and not plain[0]:
+        plain.pop(0)
+    while plain and not plain[-1]:
+        plain.pop()
+    return [row for line in plain for row in _tui_wrap(_tui_pause_paths(line, width), width)]
+
+
 class _PauseScreen:
-    """Bounded result/error output dismissed with Enter or Escape."""
+    """Scrollable, wrapped result/error output with a reserved overflow row."""
 
     cancel_on_interrupt = True
 
     def __init__(self, lines: list[str]) -> None:
         self.lines = lines
         self._mode = "full"
+        self._offset = 0
+        self._page = 1
+        self._wrapped: list[str] = []
 
     def draw(self, cols: int, rows: int) -> list[str]:
         self._mode = _size_mode(cols, rows)
         if self._mode == "small":
             return _too_small_lines()
+        self._wrapped = _tui_pause_lines(self.lines, cols - 1)
         room = rows - len(self.footer())
-        return self.lines[:room]
+        overflow = len(self._wrapped) > room
+        self._page = max(1, room - int(overflow))
+        self._offset = min(self._offset, max(0, len(self._wrapped) - self._page))
+        end = self._offset + self._page
+        body = self._wrapped[self._offset:end]
+        if overflow:
+            hidden = len(self._wrapped) - len(body)
+            body.append(f"{hidden} hidden · lines {self._offset + 1}-{end} of {len(self._wrapped)}")
+        return body
 
     def footer(self) -> list[str]:
         if self._mode == "small":
             return []
-        hint = _paint("Enter/Esc/Ctrl+C Continue", _C.DIM)
-        return ["", "  " + hint] if self._mode == "full" else [hint]
+        if self._mode == "compact":
+            return [_paint("↑↓ PgUp/PgDn Home/End Enter/Esc/Ctrl+C", _C.DIM)]
+        return [_paint("↑/↓ scroll · PgUp/PgDn page · Home/End first/last", _C.DIM),
+                _paint("Enter/Esc/Ctrl+C Continue", _C.DIM)]
 
     def handle(self, key: str) -> _ExitMarker | None:
-        return _EXIT if key in ("enter", "esc") else None
+        if key in ("enter", "esc"):
+            return _EXIT
+        moves = {"up": -1, "down": 1, "page_up": -self._page, "page_down": self._page,
+                 "home": -len(self._wrapped), "end": len(self._wrapped)}
+        self._offset = max(0, min(self._offset + moves.get(key, 0),
+                                  max(0, len(self._wrapped) - self._page)))
+        return None
 
 
 @contextmanager
@@ -689,7 +802,7 @@ def _menu_result_output():
 
 
 def _wait_for_enter() -> None:
-    """Redraw a bounded result, including on idle resize, until Enter or Escape."""
+    """Scroll a bounded result, including on idle resize, until dismissal."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return
     _run_screen(_PauseScreen(list(_TUI_LAST_LINES)))
@@ -1964,15 +2077,140 @@ def _print_create_counts(report: CreateReport) -> None:
     print(f"  {report.included_inputs} included, {report.accidental_skips} skipped.")
 
 
+def _print_menu_create_counts(report: CreateReport) -> None:
+    skipped = report.accidental_skips + len(report.skipped)
+    print(f"  {report.included_inputs} included, {skipped} skipped.")
+
+
 def _print_menu_create_error(exc: CreateError, password: str | None) -> None:
     _clear_screen()
     with _menu_result_output():
         print()
         print("  error: existing archive preserved." if exc.preserved_existing
               else "  error: archive was not created.")
-        _print_create_counts(exc.report)
-        _print_create_skips(exc.report, password=password)
+        _print_menu_create_counts(exc.report)
         print(f"  {_create_diagnostic_text(exc, password)}")
+        _print_create_skips(exc.report, password=password)
+
+
+def _print_menu_create_result(report: CreateReport, password: str | None) -> None:
+    print("  Archive is incomplete." if report.accidental_skips else "  Creation complete.")
+    _print_menu_create_counts(report)
+    _print_create_summary(report)
+    _print_create_skips(report, password=password)
+    _print_menu_skipped(report.skipped)
+
+
+def _print_menu_extract_result(report: ExtractReport) -> None:
+    print("  Extraction complete.")
+    print(f"  {report.total} included, {len(report.skipped)} skipped.")
+    _print_extract_summary(report)
+    _print_menu_skipped(report.skipped)
+
+
+def _print_menu_test_result(report: TestReport) -> None:
+    print("Archive is OK.")
+    print(f"  {report.entries} entries, {report.files} files, {human_bytes(report.bytes_read)} decoded")
+    print(f"Tested {_safe(report.archive)}  [{report.format.value}]")
+
+
+_UNKNOWN_ARCHIVE_STATE = object()
+
+
+def _menu_archive_stamp(path: Path | None):
+    if path is None:
+        return _UNKNOWN_ARCHIVE_STATE
+    try:
+        value = path.lstat()
+        return (value.st_dev, value.st_ino, value.st_ctime_ns, value.st_mtime_ns, value.st_size)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return _UNKNOWN_ARCHIVE_STATE
+
+
+def _menu_create_cancel_message(archive: Path | None, before) -> str:
+    after = _menu_archive_stamp(archive)
+    if before is _UNKNOWN_ARCHIVE_STATE or after is _UNKNOWN_ARCHIVE_STATE:
+        return "Archive state could not be verified; check the output path."
+    if before is not _UNKNOWN_ARCHIVE_STATE and after == before:
+        return "No archive was created; any existing archive was left unchanged."
+    if after is not None and after is not _UNKNOWN_ARCHIVE_STATE:
+        return "The current archive was kept; it may already have been published."
+    return "Archive state could not be verified; check the output path."
+
+
+def _print_menu_cancel(operation: str, archive: Path | None = None,
+                       before=_UNKNOWN_ARCHIVE_STATE, notes: Sequence[str] = ()) -> None:
+    _clear_screen()
+    with _menu_result_output():
+        if operation == "create":
+            print("Create cancelled.")
+            print(_menu_create_cancel_message(archive, before))
+        elif operation == "extract":
+            print("Extraction cancelled.")
+            print("Files already published were kept; unfinished staged files were removed where possible.")
+        else:
+            print("Test cancelled. No changes were made.")
+        if archive is not None:
+            print(f"{'Output' if operation == 'create' else 'Archive'}: {_safe(archive)}")
+        for note in notes:
+            print(f"warning: {note}")
+
+
+@contextmanager
+def _menu_operation_signals():
+    """Let the first SIGINT cancel; protect engine unwinding from a second."""
+    previous = signal.getsignal(signal.SIGINT)
+
+    def interrupt(signum, frame):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, interrupt)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+_MenuReport = TypeVar("_MenuReport", CreateReport, ExtractReport, TestReport)
+
+
+def _menu_run_operation(operation: str, action: Callable[[_TuiProgressDisplay], _MenuReport], *,
+                        password: str | None = None, archive: Path | None = None) -> _MenuReport | None:
+    display = _TuiProgressDisplay(operation)
+    before = _menu_archive_stamp(archive) if operation == "create" else _UNKNOWN_ARCHIVE_STATE
+    with _menu_operation_signals():
+        try:
+            with _menu_password_errors(password):
+                report = action(display)
+            skipped = len(report.skipped) if isinstance(report, (CreateReport, ExtractReport)) else 0
+            if isinstance(report, CreateReport):
+                skipped += report.accidental_skips
+            display.finish(skipped)
+            return report
+        except _TerminalEOF:
+            raise
+        except KeyboardInterrupt as exc:
+            display.abort()
+            notes = [_create_diagnostic_text(note, password) for note in getattr(exc, "__notes__", ())]
+            _print_menu_cancel(operation, archive, before, notes)
+            return None
+        finally:
+            display.abort()
+
+
+def _menu_create_archive(engine: ArchiveEngine, options: _CreateOptions, precollected) -> CreateReport | None:
+    try:
+        return _menu_run_operation("create", lambda display: engine.create(
+            options.archive_path, options.sources, fmt=options.fmt, root=options.cwd,
+            compresslevel=options.compresslevel, symlinks=options.symlinks,
+            password=options.password, progress=display, precollected=precollected),
+            password=options.password, archive=options.archive_path)
+    except CreateError as exc:
+        _print_menu_create_error(exc, options.password)
+        return None
 
 
 def _menu_create(engine: ArchiveEngine) -> None:
@@ -2025,32 +2263,11 @@ def _menu_create(engine: ArchiveEngine) -> None:
         return
 
     print()
-    display = ProgressDisplay("create")
-    with _menu_password_errors(options.password):
-        try:
-            report = engine.create(
-                options.archive_path,
-                options.sources,
-                fmt=options.fmt,
-                root=cwd,
-                compresslevel=options.compresslevel,
-                symlinks=options.symlinks,
-                password=options.password,
-                progress=display,
-                precollected=precollected,
-            )
-        except CreateError as exc:
-            _print_menu_create_error(exc, options.password)
-            return
+    report = _menu_create_archive(engine, options, precollected)
+    if report is None:
+        return
     with _menu_result_output():
-        print()
-        if report.accidental_skips:
-            print("  Archive is incomplete.")
-            _print_create_counts(report)
-            _print_create_skips(report, password=options.password)
-            print()
-        _print_create_summary(report)
-        _print_menu_skipped(report.skipped)
+        _print_menu_create_result(report, options.password)
 
 
 def _menu_selected_members(names: list[str], selected: set[str]) -> list[str] | None:
@@ -2444,16 +2661,15 @@ def _menu_extract(engine: ArchiveEngine) -> None:
 
     _clear_screen()
     print(f"\n  Extracting {_safe(archive.name)} into {_safe(options.destination)}…\n")
-    display = ProgressDisplay("extract")
-    with _menu_password_errors(options.password):
-        report = engine.extract(archive, options.destination, members=options.members, overwrite=options.overwrite,
-                                preserve_metadata=options.metadata, symlinks=options.symlinks,
-                                strip_components=options.strip_components, password=options.password,
-                                limits=options.limits, progress=display)
+    report = _menu_run_operation("extract", lambda display: engine.extract(
+        archive, options.destination, members=options.members, overwrite=options.overwrite,
+        preserve_metadata=options.metadata, symlinks=options.symlinks,
+        strip_components=options.strip_components, password=options.password,
+        limits=options.limits, progress=display), password=options.password, archive=archive)
+    if report is None:
+        return
     with _menu_result_output():
-        print()
-        _print_extract_summary(report)
-        _print_menu_skipped(report.skipped)
+        _print_menu_extract_result(report)
 
 
 def _menu_test(engine: ArchiveEngine) -> None:
@@ -2475,11 +2691,12 @@ def _menu_test(engine: ArchiveEngine) -> None:
         elif choice == "r":
             break
     _clear_screen()
-    with _menu_password_errors(password):
-        report = engine.test(archive, password=password, progress=ProgressDisplay("test"))
+    report = _menu_run_operation("test", lambda display: engine.test(
+        archive, password=password, progress=display), password=password, archive=archive)
+    if report is None:
+        return
     with _menu_result_output():
-        print()
-        _print_test_summary(report)
+        _print_menu_test_result(report)
 
 
 def _menu_list(engine: ArchiveEngine) -> None:
@@ -2885,6 +3102,29 @@ class _CliProgressDisplay(ProgressDisplay):
             self.stream.flush()
         except BrokenPipeError:
             self._closed_pipe()
+
+
+class _TuiProgressDisplay(_CliProgressDisplay):
+    """Use the CLI's counters and completion rules within the TUI cell budget."""
+
+    def __init__(self, operation: str, stream=None) -> None:
+        super().__init__(operation, stream=sys.stdout if stream is None else stream, defer_final=True)
+
+    def _render(self, force: bool = False, final: bool = False) -> None:
+        if self.quiet:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_render < _TTY_REFRESH:
+            return
+        self._last_render = now
+        elapsed = max(now - self.start_time, 1e-9)
+        if self.tty:
+            line = _cli_progress_line(self, max(1, _term_size()[0] - 1), elapsed)
+            self._line_open = not final
+            self.stream.write("\r" + line + _CLEAR_LINE + ("\n" if final else ""))
+            self.stream.flush()
+        else:
+            self._render_plain(final, elapsed, self.bytes_done / elapsed)
 
 
 def _silence_closed_pipe(stream) -> None:

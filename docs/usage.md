@@ -134,13 +134,22 @@ Submitted nonempty lines are kept in memory by prompt kind for this process. Pro
 
 | Keys | Action | Code |
 |---|---|---|
-| Enter, Escape, Ctrl+C | Dismiss a result or error pause and return to the main menu. | [snug.py:626](../snug.py#L626), [snug.py:646](../snug.py#L646), [snug.py:130](../snug.py#L130), [snug.py:2418](../snug.py#L2418) |
+| Up, Down | Scroll result and error details one line. | [snug.py:777](../snug.py#L777) |
+| PgUp, PgDn | Scroll one page. | [snug.py:777](../snug.py#L777) |
+| Home, End | Show the first or last page. | [snug.py:777](../snug.py#L777) |
+| Enter, Escape, Ctrl+C | Dismiss a result or error pause and return to the main menu. | [snug.py:777](../snug.py#L777), [snug.py:114](../snug.py#L114), [snug.py:2761](../snug.py#L2761) |
 
-Ctrl+C acts like Escape in option menus, members, limits and line prompts. In either picker it cancels immediately, while Escape clears filtering first. At the main menu Ctrl+C quits with status 130. [snug.py:130](../snug.py#L130), [snug.py:1470](../snug.py#L1470), [snug.py:949](../snug.py#L949), [snug.py:1080](../snug.py#L1080), [snug.py:2433](../snug.py#L2433).
+Results show status and counts before warning details. Error causes and messages wrap; long paths shorten in the middle to keep the end of the filename visible. When details exceed the screen, a reserved row reports the hidden line count and the visible range; the key footer stays on screen at 80×24 and 40×10. [snug.py:2096](../snug.py#L2096), [snug.py:2104](../snug.py#L2104), [snug.py:2111](../snug.py#L2111), [snug.py:663](../snug.py#L663), [snug.py:690](../snug.py#L690), [snug.py:753](../snug.py#L753).
 
-Passwords use the CLI's secure getpass prompt, not this line editor. Ctrl+C at that prompt, or during an archive engine operation, can end the session with status 130. Source enumeration before creation can be cancelled with Escape, q, Q or Ctrl+C. [snug.py:1636](../snug.py#L1636), [snug.py:2580](../snug.py#L2580), [snug.py:2459](../snug.py#L2459), [snug.py:1196](../snug.py#L1196).
+Ctrl+C acts like Escape in option menus, members, limits and line prompts. In either picker it cancels immediately, while Escape clears filtering first. At the main menu Ctrl+C quits with status 130. [snug.py:114](../snug.py#L114), [snug.py:1644](../snug.py#L1644), [snug.py:1063](../snug.py#L1063), [snug.py:1211](../snug.py#L1211), [snug.py:2787](../snug.py#L2787).
 
-Extraction is transactional per regular file. Files are staged and published after decoding succeeds. A later publication failure can leave earlier files, directories or links in place. There is no whole-archive rollback. [snug_core.py:1153](../snug_core.py#L1153), [snug_core.py:2135](../snug_core.py#L2135).
+During TUI create, extract or test, Ctrl+C cancels the operation, shows a result pause and returns to the menu after dismissal. Before create publication, no archive is created and any existing archive is unchanged. If the output changed before cancellation, the pause says the current archive was kept and may already have been published; if its state cannot be verified, it asks you to check the output path. Extraction keeps files already published and removes unfinished staging where possible. Test makes no file changes. A second Ctrl+C during engine cleanup is ignored until cleanup finishes; the previous interrupt handler is then restored. CLI operation interrupts still exit 130. [snug.py:2120](../snug.py#L2120), [snug.py:2132](../snug.py#L2132), [snug.py:2143](../snug.py#L2143), [snug.py:2162](../snug.py#L2162), [snug.py:2180](../snug.py#L2180), [snug.py:4055](../snug.py#L4055).
+
+TUI progress uses the CLI completion rules: unknown byte totals stay indeterminate until success; skipped work reaches completion without claiming skipped bytes were processed. The progress line fits the screen by terminal cell width. [snug.py:3107](../snug.py#L3107), [snug.py:2976](../snug.py#L2976), [snug.py:3049](../snug.py#L3049).
+
+Passwords use the CLI's secure getpass prompt, not this line editor. Ctrl+C at that prompt can still end the session with status 130. Source enumeration before creation can be cancelled with Escape, q, Q or Ctrl+C. [snug.py:1833](../snug.py#L1833), [snug.py:2809](../snug.py#L2809), [snug.py:1341](../snug.py#L1341).
+
+Extraction is transactional per regular file. Files are staged and published after decoding succeeds. A later publication failure can leave earlier files, directories or links in place. There is no whole-archive rollback. [snug_core.py:1152](../snug_core.py#L1152), [snug_core.py:2326](../snug_core.py#L2326).
 
 ### Piped and non-TTY input
 
