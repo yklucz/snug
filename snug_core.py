@@ -19,6 +19,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import unicodedata
 import zipfile
 import zlib
 from contextlib import ExitStack, contextmanager
@@ -99,6 +100,42 @@ def _paint(text: str, *codes: str) -> str:
 def _visible_len(text: str) -> int:
     """Length of *text* ignoring ANSI SGR sequences."""
     return len(_ANSI_RE.sub("", text))
+
+
+def _char_cells(char: str) -> int:
+    if unicodedata.combining(char) or unicodedata.category(char) in ("Mn", "Me", "Cf", "Cc", "Cs"):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def _cell_width(text: str) -> int:
+    """Terminal cells for CLI progress; existing TUI helpers stay separate."""
+    return sum(_char_cells(char) for char in _ANSI_RE.sub("", text))
+
+
+def _truncate_cells(text: str, width: int) -> str:
+    """Fit whole characters and their combining marks within a cell budget."""
+    if width <= 0:
+        return ""
+    if _cell_width(text) <= width:
+        return text
+    kept: list[str] = []
+    cells = pos = 0
+    while pos < len(text):
+        sgr = _ANSI_RE.match(text, pos)
+        if sgr is not None:
+            kept.append(sgr.group())
+            pos = sgr.end()
+            continue
+        char = text[pos]
+        size = _char_cells(char)
+        if cells + size > width - 1:
+            break
+        kept.append(char)
+        cells += size
+        pos += 1
+    reset = _C.RESET if _ANSI_RE.search(text) else ""
+    return "".join(kept) + "…" + reset
 
 
 def _safe(text: object) -> str:

@@ -200,13 +200,15 @@ snug create notes.zip folder/notes.txt --root folder/
 
 ZIP and GZIP use levels 0–9. BZIP2 uses 1–9, with a requested 0 mapped to 1. XZ and LZMA use presets 0–9; 7z uses an LZMA2 preset when a level is supplied. Uncompressed TAR, CPIO, and AR have no compression-level effect. Higher levels generally trade time for compression; the CLI does not select arbitrary codecs.
 
-Snug streams large regular-file payloads and supports ZIP64. Native and libarchive operations report byte progress, speed, and ETA; 7z creation reports item progress because py7zr does not provide input-byte callbacks. Archive creation writes a temporary sibling file before publishing the result.
+Snug streams large regular-file payloads and supports ZIP64. In a terminal, CLI byte progress shows a percentage when the total is known. Item-only progress shows the entry counter. Unknown byte totals show processed bytes without a percentage or bar. The final line confirms completion and shows a skipped count when nonzero. Skipped work counts as processed without counting its bytes as read or written. Archive creation writes a temporary sibling file before publishing the result.
 
-If an input is omitted because of an error, Snug warns on stderr with its path and cause, even with `-q`. It prints the first 20 accidental skips and a count of any remaining skips. A published partial archive returns status 5. The final warning gives the included and skipped input counts. [snug.py:1867](../snug.py#L1867), [snug.py:2753](../snug.py#L2753).
+CLI progress uses stderr's terminal width. It drops speed below 80 columns, ETA or elapsed time below 60, and the bar below 40. Fields also drop when the counter needs more space. Narrow layouts shorten units and operation names to retain the counter. Member names are shortened by terminal cell width. Non-terminal stderr receives only the final progress line. `-q` suppresses progress.
 
-An accidental skip prevents replacement of an existing archive, including with `--force`. Snug discards its temporary file, preserves the existing archive, and returns status 2. If no inputs could be included because of errors, Snug returns status 2 and publishes no archive. Some backends abort on input read errors instead of continuing with a partial archive. [snug_core.py:2210](../snug_core.py#L2210), [snug.py:3323](../snug.py#L3323).
+If an input is omitted because of an error, Snug warns on stderr with its path and cause, even with `-q`. It prints the first 20 accidental skips and a count of any remaining skips. A published partial archive returns status 5, including when stderr is closed. The final warning gives the included and skipped input counts. [snug.py:1948](../snug.py#L1948), [snug.py:3191](../snug.py#L3191), [snug.py:3232](../snug.py#L3232).
 
-Intentional omissions keep status 0. These include `--symlinks skip`, unsupported source types, and duplicate names that refer to the same real file. Different files with the same archive name cause an accidental skip. If file identity cannot be determined, Snug keeps the existing silent deduplication behavior. [snug_core.py:905](../snug_core.py#L905), [snug.py:2757](../snug.py#L2757).
+An accidental skip prevents replacement of an existing archive, including with `--force`. Snug discards its temporary file, preserves the existing archive, and returns status 2. If no inputs could be included because of errors, Snug returns status 2 and publishes no archive. Some backends abort on input read errors instead of continuing with a partial archive. [snug_core.py:2247](../snug_core.py#L2247), [snug.py:3812](../snug.py#L3812).
+
+Intentional omissions keep status 0. These include `--symlinks skip`, unsupported source types, and duplicate names that refer to the same real file. Different files with the same archive name cause an accidental skip. If file identity cannot be determined, Snug keeps the existing silent deduplication behavior. [snug_core.py:942](../snug_core.py#L942), [snug.py:3237](../snug.py#L3237).
 
 ## Extract archives
 
@@ -307,7 +309,7 @@ snug test notes.txt.xz --quiet
 
 `test` consumes real payloads without creating extracted files. ZIP regular-file and symlink payloads are read fully to verify CRCs; TAR regular files and standalone streams are fully decoded; 7z uses a counting null-sink writer; libarchive consumes regular-file blocks. Compressed TAR trailers are also read. Payload transfers are bounded, although codecs retain their own memory requirements.
 
-Success reports entry/file counts, decoded size, and `Archive is OK.` Failures identify the member when available and report the decoder or validation error. `--quiet` suppresses progress and the success summary. Byte progress is used when totals are known, otherwise entry progress is used. Unsafe member structures are rejected before payload testing.
+Success reports entry/file counts, decoded size, and `Archive is OK.` Failures identify the member when available and report the decoder or validation error. `--quiet` suppresses progress and the success summary. CLI progress for unknown totals stays indeterminate until decoding finishes. Unsafe member structures are rejected before payload testing.
 
 Testing verifies only what the format and decoder can establish. Plain TAR and other formats without payload checksums cannot detect every content change, and a successful test is neither an authenticity check nor a malware scan. `test` does not recursively test archives stored as members.
 
@@ -370,8 +372,8 @@ Checks report the latest stable release; only `snug update` requests installatio
 | `2` | Invalid CLI arguments, an archive/format/I/O error, or unhealthy required components reported by `doctor`. |
 | `3` | Extraction or integrity testing rejected an unsafe archive. |
 | `4` | An explicit extraction resource limit was exceeded. |
-| `5` | An archive was created but is incomplete because inputs were skipped due to errors. [snug.py:3094](../snug.py#L3094). |
-| `130` | Command interrupted. In the TUI, main-menu, secure-password or archive-operation interruptions can exit with 130; screen cancellation follows the rules above. [snug.py:2577](../snug.py#L2577), [snug.py:2604](../snug.py#L2604), [snug.py:3692](../snug.py#L3692). |
+| `5` | An archive was created but is incomplete because inputs were skipped due to errors. [snug.py:3236](../snug.py#L3236). |
+| `130` | Command interrupted. In the TUI, main-menu, secure-password or archive-operation interruptions can exit with 130; screen cancellation follows the rules above. [snug.py:2579](../snug.py#L2579), [snug.py:2606](../snug.py#L2606), [snug.py:3834](../snug.py#L3834). |
 
 Archive command errors start with `error:` on stderr. They identify the archive and the file or member when available. They state the cause and give a next step where one is clear. Interrupted operations return status 130. Active progress ends before an error or interruption message.
 

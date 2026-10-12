@@ -36,8 +36,8 @@ from snug_core import (
     ExtractReport, TestReport, ExtractionLimits, ResourceLimitError, parse_size,
     FormatError, NativeBackend, NullProgress, ProgressDisplay,
     ProgressSink, StreamBackend, UnsafeArchiveError, __version__,
-    _ARCHIVE_SUFFIXES, _C, _file_size, _init_color, _iter_items, _paint,
-    _safe, _truncate, _visible_len, detect_format, human_bytes, human_time,
+    _ARCHIVE_SUFFIXES, _C, _TTY_REFRESH, _cell_width, _file_size, _init_color, _iter_items, _paint,
+    _safe, _truncate, _truncate_cells, _visible_len, detect_format, human_bytes, human_time,
 )
 
 
@@ -1945,16 +1945,19 @@ def _create_diagnostic_text(value, password: str | None) -> str:
     return _safe(text.replace(password, "[redacted]") if password else text)
 
 
-def _print_create_skips(report: CreateReport, *, password: str | None = None) -> None:
+def _print_create_skips(report: CreateReport, *, password: str | None = None,
+                        emit: Callable[[str], None] | None = None) -> None:
+    if emit is None:
+        emit = lambda message: print(message, file=sys.stderr)
     for skipped in report.skip_errors[:20]:
         path = _create_diagnostic_text(skipped.path, password)
         reason = _create_diagnostic_text(skipped.reason, password)
-        print(f"warning: skipped {path}: {reason}", file=sys.stderr)
+        emit(f"warning: skipped {path}: {reason}")
     if report.accidental_skips > 20:
-        print(f"warning: {report.accidental_skips - 20} more inputs skipped "
-              f"({report.accidental_skips} total)", file=sys.stderr)
+        emit(f"warning: {report.accidental_skips - 20} more inputs skipped "
+             f"({report.accidental_skips} total)")
     if report.cleanup_warning:
-        print(f"warning: {_create_diagnostic_text(report.cleanup_warning, password)}", file=sys.stderr)
+        emit(f"warning: {_create_diagnostic_text(report.cleanup_warning, password)}")
 
 
 def _print_create_counts(report: CreateReport) -> None:
@@ -2721,12 +2724,133 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-class _CliProgressDisplay(ProgressDisplay):
-    """Keep CLI diagnostics separate from an unfinished progress line."""
+def _cli_progress_width(stream) -> int:
+    try:
+        return max(os.get_terminal_size(stream.fileno()).columns, 1)
+    except (AttributeError, OSError, ValueError):
+        return 80
 
-    def __init__(self, operation: str, quiet: bool = False, stream=None) -> None:
+
+def _cli_progress_number(value: int | float, *, byte_units: bool = False) -> str:
+    scale = 1024 if byte_units else 1000
+    number = max(value, 0)
+    for unit in ("", "K", "M", "G", "T", "P", "E"):
+        if unit == "E" and number >= scale:
+            return f"{value:.1g}".replace("e+", "e") + ("B" if byte_units else "")
+        if number < scale or unit == "E":
+            suffix = "B" if byte_units and not unit else unit
+            return f"{number:.3g}{suffix}".replace("e+", "e")
+        number /= scale
+    return "0"
+
+
+def _cli_progress_counter(display: "_CliProgressDisplay", compact: bool) -> str:
+    if display.total_bytes and not display._skipped:
+        if compact:
+            return (f"{_cli_progress_number(display.bytes_done, byte_units=True)}/"
+                    f"{_cli_progress_number(display.total_bytes, byte_units=True)}")
+        return f"{human_bytes(display.bytes_done)}/{human_bytes(display.total_bytes)}"
+    processed = display.total_items if display._complete else display.items_done
+    if compact:
+        return f"{_cli_progress_number(processed)}/{_cli_progress_number(display.total_items)}"
+    return f"{processed}/{display.total_items} items"
+
+
+def _cli_progress_state(display: "_CliProgressDisplay", width: int) -> str:
+    if not display.total_bytes:
+        return "done" if display._complete else "working"
+    precision = 0 if width < 59 else 1
+    return f"{display._fraction() * 100:.{precision}f}%"
+
+
+def _cli_progress_fit(display: "_CliProgressDisplay", width: int, counter: str, compact: str) -> str:
+    state = _cli_progress_state(display, width)
+    skipped = f"skip {_cli_progress_number(display._skipped)}" if display._skipped else ""
+    candidates = ((display.operation, counter), (display.operation, compact),
+                  (display.operation[:2], compact), ("", compact))
+    for operation, units in candidates:
+        line = " ".join(part for part in (operation, state, units, skipped) if part)
+        if _cell_width(line) <= width:
+            return line
+    processed = _cli_progress_number(display.total_items)
+    return f"{state} {processed} {skipped}".rstrip()
+
+
+def _cli_progress_essential(display: "_CliProgressDisplay", width: int) -> str:
+    if not display.total_bytes and (display.bytes_done or
+                                   (display.total_items <= 1 and display.operation != "create")):
+        counter = _cli_progress_number(display.bytes_done, byte_units=True)
+        return _cli_progress_fit(display, width, counter, counter)
+    return _cli_progress_fit(display, width,
+                             _cli_progress_counter(display, compact=width < 59),
+                             _cli_progress_counter(display, compact=True))
+
+
+def _cli_progress_fields(display: "_CliProgressDisplay", width: int, elapsed: float) -> list[str]:
+    speed = display.bytes_done / elapsed
+    fields = []
+    if width >= 39 and display.total_bytes:
+        filled = int(display._fraction() * 12)
+        fields.append("[" + "=" * filled + "-" * (12 - filled) + "]")
+    if width >= 59:
+        remaining = max(display.total_bytes - display.bytes_done, 0)
+        detail = f"ETA {human_time(remaining / speed if speed else float('inf'))}"
+        fields.append(detail if display.total_bytes and not display._complete else f"elapsed {human_time(elapsed)}")
+    if width >= 79 and (display.total_bytes or display.bytes_done or display.operation != "create"):
+        fields.append(f"{_cli_progress_number(speed, byte_units=True)}/s")
+    return fields
+
+
+def _cli_progress_line(display: "_CliProgressDisplay", width: int, elapsed: float) -> str:
+    line = _cli_progress_essential(display, width)
+    for field in _cli_progress_fields(display, width, elapsed):
+        candidate = f"{line} | {field}"
+        if _cell_width(candidate) > width:
+            break
+        line = candidate
+    available = width - _cell_width(line) - 3
+    if display.current and available > 0:
+        line += " | " + _truncate_cells(display.current, available)
+    return _truncate_cells(line, width)
+
+
+class _CliProgressDisplay(ProgressDisplay):
+    """Render bounded CLI progress without changing the TUI renderer."""
+
+    def __init__(self, operation: str, quiet: bool = False, stream=None,
+                 *, defer_final: bool = False) -> None:
         super().__init__(operation, quiet=quiet, stream=stream)
         self._line_open = False
+        self._defer_final = defer_final
+        self._complete = False
+        self._skipped = 0
+
+    def done(self) -> None:
+        if not self._defer_final:
+            self.finish()
+
+    def finish(self, skipped_count: int = 0) -> None:
+        if self._complete:
+            return
+        self._complete = True
+        self._skipped = skipped_count
+        self._render(force=True, final=True)
+
+    def _fraction(self) -> float:
+        return 1.0 if self._complete else super()._fraction()
+
+    def _render_plain(self, final: bool, elapsed: float, speed: float) -> None:
+        if not self._skipped:
+            super()._render_plain(final, elapsed, speed)
+            return
+        if not final:
+            return
+        detail = (f", {human_bytes(self.bytes_done)} in {human_time(elapsed)} "
+                  f"(avg {human_bytes(speed)}/s)" if self.total_bytes else
+                  f" in {human_time(elapsed)}")
+        self.stream.write(f"{self.operation}: {self.total_items}/{self.total_items} items"
+                          f"{detail}, {self._skipped} skipped\n")
+        self.stream.flush()
 
     def _closed_pipe(self) -> None:
         self.quiet = True
@@ -2734,16 +2858,23 @@ class _CliProgressDisplay(ProgressDisplay):
         _silence_closed_pipe(self.stream)
 
     def _render(self, force: bool = False, final: bool = False) -> None:
-        previous = self._last_render
-        if self.tty and not self.quiet and force:
-            self._line_open = True
+        if self.quiet:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_render < _TTY_REFRESH:
+            return
+        self._last_render = now
+        elapsed = max(now - self.start_time, 1e-9)
         try:
-            super()._render(force=force, final=final)
+            if self.tty:
+                self._line_open = not final
+                line = _cli_progress_line(self, _cli_progress_width(self.stream) - 1, elapsed)
+                self.stream.write("\r" + line + "\x1b[K" + ("\n" if final else ""))
+                self.stream.flush()
+            else:
+                self._render_plain(final, elapsed, self.bytes_done / elapsed)
         except BrokenPipeError:
             self._closed_pipe()
-        else:
-            if self.tty and not self.quiet and (force or self._last_render != previous):
-                self._line_open = not final
 
     def abort(self) -> None:
         if not self._line_open:
@@ -3057,13 +3188,22 @@ def _print_entry_verbose(entry: ArchiveEntry) -> None:
 
 # -- per-command handlers --------------------------------------------------- #
 
+def _emit_cli_create_warning(message: str) -> None:
+    """A closed warning consumer cannot undo a published archive's status."""
+    try:
+        print(message, file=sys.stderr)
+        sys.stderr.flush()
+    except BrokenPipeError:
+        _silence_closed_pipe(sys.stderr)
+
+
 def _cmd_create(args, engine: ArchiveEngine) -> int:
     archive_path = Path(args.archive)
     if archive_path.exists() and not args.force:
         raise ArchiveError(
             f"archive already exists: {archive_path} (use --force to replace it)"
         )
-    display = _CliProgressDisplay("create", quiet=args.quiet)
+    display = _CliProgressDisplay("create", quiet=args.quiet, defer_final=True)
     args._cli_progress = display
     password = _read_password(args)
     try:
@@ -3078,25 +3218,27 @@ def _cmd_create(args, engine: ArchiveEngine) -> int:
                 progress=display,
                 password=password,
             )
+            display.finish(len(report.skipped) + report.accidental_skips)
         finally:
             display.abort()
     except CreateError as exc:
         _print_create_skips(exc.report, password=password)
         raise
-    _print_create_skips(report, password=password)
+    _print_create_skips(report, password=password, emit=_emit_cli_create_warning)
     if not args.quiet:
         _print_create_summary(report)
         for name in report.skipped:
-            print(f"  skipped: {_safe(name)}", file=sys.stderr)
+            _emit_cli_create_warning(f"  skipped: {_safe(name)}")
     if report.accidental_skips:
-        print(f"warning: archive is incomplete: {report.included_inputs} included, "
-              f"{report.accidental_skips} skipped", file=sys.stderr)
+        _emit_cli_create_warning(
+            f"warning: archive is incomplete: {report.included_inputs} included, "
+            f"{report.accidental_skips} skipped")
         return 5
     return 0
 
 
 def _cmd_extract(args, engine: ArchiveEngine) -> None:
-    display = _CliProgressDisplay("extract", quiet=args.quiet)
+    display = _CliProgressDisplay("extract", quiet=args.quiet, defer_final=True)
     args._cli_progress = display
     try:
         report = engine.extract(
@@ -3111,6 +3253,7 @@ def _cmd_extract(args, engine: ArchiveEngine) -> None:
             progress=display,
             password=_read_password(args),
         )
+        display.finish(len(report.skipped))
     finally:
         display.abort()
     if args.quiet:
@@ -3129,10 +3272,11 @@ def _cmd_list(args, engine: ArchiveEngine) -> None:
 
 
 def _cmd_test(args, engine: ArchiveEngine) -> None:
-    display = _CliProgressDisplay("test", quiet=args.quiet)
+    display = _CliProgressDisplay("test", quiet=args.quiet, defer_final=True)
     args._cli_progress = display
     try:
         report = engine.test(args.archive, password=_read_password(args), progress=display)
+        display.finish()
     finally:
         display.abort()
     if not args.quiet:
