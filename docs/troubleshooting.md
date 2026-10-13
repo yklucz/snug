@@ -43,7 +43,7 @@ export SNUG_BREW="/opt/homebrew/bin/brew"
 snug --version
 ```
 
-Use your actual path (`/usr/local/bin/brew` or `/home/linuxbrew/.linuxbrew/bin/brew` are other searched locations). The Unix managed installer requires Homebrew even when system Python/libarchive exists. Choose a source installation to use distribution packages instead.
+Use the path to your Homebrew executable. Snug also looks in `/opt/homebrew/bin/brew`, `/usr/local/bin/brew`, and `/home/linuxbrew/.linuxbrew/bin/brew`. Set `SNUG_BREW` for a custom prefix. The Unix managed installer requires Homebrew even when system Python/libarchive exists. Choose a source installation to use distribution packages instead.
 
 ## libarchive cannot load
 

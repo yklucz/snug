@@ -4,6 +4,12 @@ A lightweight Python CLI archive manager for macOS and Linux, with explicit comm
 
 Windows development is maintained separately on the [`windows` branch](https://github.com/yklucz/snug/tree/windows).
 
+## Supported platforms
+
+Supported: macOS on Apple Silicon and Linux. Intel Macs may work but are not tested.
+
+Platform priority is macOS on Apple Silicon, then Linux.
+
 ## Install
 
 ```bash

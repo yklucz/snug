@@ -4,7 +4,7 @@
 
 ## Platform branches and product boundary
 
-`main` is the default and canonical shared-code branch, focused on macOS and Linux. [`windows`](https://github.com/yklucz/snug/tree/windows) preserves and maintains the Windows installer, PowerShell launcher, managed x64 dependencies, packaging, and Windows-specific tests/CI. Shared archive fixes originate on `main`; port focused commits intentionally, preferably with cherry-picks once the branches diverge. Avoid developing separate ArchiveEngine implementations.
+`main` is the default and canonical shared-code branch. Platform priority is macOS on Apple Silicon first, then Linux. [`windows`](https://github.com/yklucz/snug/tree/windows) preserves and maintains the Windows installer, PowerShell launcher, managed x64 dependencies, packaging, and Windows-specific tests/CI. Shared archive fixes originate on `main`; port focused commits intentionally, preferably with cherry-picks once the branches diverge. Avoid developing separate ArchiveEngine implementations.
 
 Snug remains a CLI and terminal TUI. Keep `create`, `extract`, `list`, `info`, `test`, `doctor`, `formats`, and `update` explicit, retain the no-argument terminal menu, and pass paths as argument values. Terminal-inserted paths need quoting appropriate to the caller's shell; they do not require desktop integration. Do not introduce graphical pickers, desktop launchers, file associations, implicit path commands, or command aliases.
 
@@ -25,7 +25,9 @@ The Pyright command requires Node.js/npm and downloads that version when it is n
 python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py snug_update.py tests
 ```
 
-The [CI workflow](../.github/workflows/tests.yml) runs core tests on Linux with Python 3.10–3.14 and platform tests on macOS with Python 3.14. It installs `.[all,test]` plus native libarchive and runs compilation and pytest. Linux Python 3.14 also runs the pinned Pyright version and validates built artifacts. Windows CI runs separately on `windows`. Review actual job results before claiming a platform or Python version has passed; a local macOS run does not validate Linux or Windows.
+The [CI workflow](../.github/workflows/tests.yml) configures seven test jobs. Five run on Linux x86_64 with Python 3.10–3.14. The new Linux arm64 job and the macOS arm64 job use Python 3.14. Each job installs `.[all,test]` plus native libarchive and runs compilation and pytest. Only Linux x86_64 with Python 3.14 also runs the pinned Pyright version and validates built artifacts.
+
+The Linux arm64 job remains unverified until it runs on GitHub. Windows CI runs separately on `windows`. Review actual job results before claiming a platform or Python version has passed. A local macOS run does not validate Linux or Windows.
 
 ## Project layout
 

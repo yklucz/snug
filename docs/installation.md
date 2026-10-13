@@ -8,6 +8,10 @@ Choose a managed installer for automatic backend setup and dependency repair, or
 
 ## Requirements
 
+Supported: macOS on Apple Silicon and Linux. Intel Macs may work but are not tested.
+
+Platform priority is macOS on Apple Silicon, then Linux.
+
 - Source installations require Python 3.10 or newer, as declared in [pyproject.toml](../pyproject.toml). The base package has no third-party Python dependencies.
 - The macOS/Linux installer requires Bash, `curl`, and Homebrew (Linuxbrew on Linux). It uses Homebrew's Python environment for `py7zr`.
 - Extended formats require both the `libarchive-c` Python binding and a native libarchive library. Managed installations require libarchive 3.8+ with the readers and writers checked at startup. Source installations depend on their installed library's capabilities.
@@ -86,7 +90,7 @@ brew install libarchive
 python -m pip install '.[extended]'
 ```
 
-On macOS, Snug searches `/opt/homebrew/opt/libarchive/lib/libarchive.dylib` and `/usr/local/opt/libarchive/lib/libarchive.dylib` unless `LIBARCHIVE` is set. For another Homebrew prefix, or Linuxbrew, set the library path before running Snug:
+On macOS, Snug also looks in `/opt/homebrew/opt/libarchive/lib/libarchive.dylib` and `/usr/local/opt/libarchive/lib/libarchive.dylib` when `LIBARCHIVE` is unset. For a custom Homebrew prefix or Linuxbrew, set the library path before running Snug:
 
 On macOS:
 

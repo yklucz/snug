@@ -41,4 +41,8 @@
 - A long path typed into the TUI on older Python versions is now rejected with a message and a prefilled editor instead of raising an error. [Input probes](../snug.py#L815), [rejection context](../snug.py#L1752); `tests/test_path_probes.py::test_manual_file_probe_rejects_and_reopens_exact_draft`. The existing `tests/test_tui_lineinput.py::test_manual_rejection_context_has_closed_quotes_and_space_counts_within_cell_budget` is unchanged.
 - Ctrl+C during create setup no longer leaves the staging file created by that run. Existing output files are preserved. [Create staging cleanup](../snug_core.py#L2140); `tests/test_create_staging.py::test_sigint_immediately_after_exclusive_creation_cleans_staging` and `::test_setup_cleanup_preserves_a_replacement_staging_inode`.
 
+## 1.10C.1
+
+- Supported: macOS on Apple Silicon and Linux. Intel Macs may work but are no longer tested.
+
 See [Usage](usage.md) for the current error, pipe, and progress contracts.

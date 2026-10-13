@@ -42,7 +42,7 @@ Audited at `fcc5aca`, with the 1.10B.8 closure fixes noted below. These are cand
 | Picker-filter Backspace removes one combining codepoint. | usability | [snug.py:1112](../snug.py#L1112). The text editor has different base-plus-mark boundaries, [snug.py:1411](../snug.py#L1411). |
 | Secure-password Ctrl+C ends the session. Documented choice to review. | usability | Secure input delegates to getpass and retains session interruption rather than local setting cancellation. [snug.py:1875](../snug.py#L1875), [snug.py:3214](../snug.py#L3214), [snug.py:2859](../snug.py#L2859). Preserve hidden input and secret redaction. |
 
-The early create staging residue, older-Python long-path input errors, and stale exit-status docs are resolved in the uncommitted 1.10B.8 changes. See [create staging](../snug_core.py#L2140), [input probes](../snug.py#L815), [exit status](usage.md#exit-status), `tests/test_create_staging.py`, and `tests/test_path_probes.py`.
+The early create staging residue, older-Python long-path input errors, and stale exit-status docs are resolved in the 1.10B.8 commit `4cbff3e`. See [create staging](../snug_core.py#L2140), [input probes](../snug.py#L815), [exit status](usage.md#exit-status), `tests/test_create_staging.py`, and `tests/test_path_probes.py`.
 
 The 1.10A.11 scrolling and narrow-list-name items are resolved by `fcc5aca`, [snug.py:690](../snug.py#L690), [snug.py:756](../snug.py#L756), and `tests/test_tui_results.py::test_overflow_position_and_every_scroll_key_keep_all_rows_reachable`. Both Pyright findings were resolved by `e3f9a72`, [snug.py:2504](../snug.py#L2504) and [snug.py:2641](../snug.py#L2641).
 
@@ -51,5 +51,6 @@ The 1.10A.11 scrolling and narrow-list-name items are resolved by `fcc5aca`, [sn
 | Item | Class | Limit |
 |---|---|---|
 | Current Linux and other supported Python versions. | usability | macOS Python 3.14.0 passes 2,480 tests without skips after 1.10B.8. Local Python 3.13.5 passes the unchanged long-path cases and all 44 new checks, but its full run has one pre-existing permission-message failure and 181 skips. Python 3.13.16 lacks pytest. No local 3.10, 3.11, or 3.12 interpreter was found. Current Linux execution remains unverified. |
+| Linux arm64 CI. | usability | Linux arm64 CI is unverified until it runs on GitHub; arm64 hosted runners may be unavailable for private repositories. [New workflow job](../.github/workflows/tests.yml#L22). |
 | Native Terminal.app and Ghostty glyph, cursor, wrapping, and flicker checks. | cosmetic | Automated width and PTY byte checks do not establish physical font rendering or complex emoji width. [snug.py:424](../snug.py#L424); `tests/test_tui_progress.py::test_unicode_width_resize_and_throttle`. |
 | Physical disk-full and durability behavior. | safety | No disk-filling experiment was run. fsync remains best effort and suppresses OSError. [snug_core.py:1216](../snug_core.py#L1216); `tests/test_transactional.py::test_best_effort_fsync_failure_does_not_discard_valid_payload`. This is a verification limit, not a demonstrated data-loss defect. |
