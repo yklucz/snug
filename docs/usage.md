@@ -18,7 +18,7 @@ snug formats --help
 snug update --help
 ```
 
-Run `snug` without arguments to open the terminal menu. Both stdin and stdout must be terminals. Otherwise Snug prints command help and exits with status 1. [snug.py:3270](../snug.py#L3270), [snug.py:2463](../snug.py#L2463).
+Run `snug` without arguments to open the terminal menu. Both stdin and stdout must be terminals. Otherwise Snug prints command help and exits with status 1. [snug.py:4143](../snug.py#L4143), [snug.py:2864](../snug.py#L2864).
 
 Use explicit commands for scripts:
 
@@ -33,102 +33,104 @@ snug formats [--json]
 snug update [--check | --enable-checks | --disable-checks]
 ```
 
-Use the full command name. `snug PATH` and single-letter command aliases are invalid. `extract` accepts one archive; `create` accepts one or more sources. [snug.py:2499](../snug.py#L2499), [snug.py:2512](../snug.py#L2512), [snug.py:2528](../snug.py#L2528), [snug.py:2547](../snug.py#L2547), [snug.py:2564](../snug.py#L2564).
+Use the full command name. `snug PATH` and single-letter command aliases are invalid. `extract` accepts one archive; `create` accepts one or more sources. [snug.py:2900](../snug.py#L2900), [snug.py:2913](../snug.py#L2913), [snug.py:2929](../snug.py#L2929), [snug.py:2948](../snug.py#L2948), [snug.py:2965](../snug.py#L2965).
 
 ### Terminal layout
 
-Full layout needs at least 80 columns and 24 rows. Compact layout needs at least 40 columns and 10 rows. Smaller terminals show a too-small message and accept cancellation. Escape keeps its current back action, including clearing a picker filter first. Ctrl+C keeps the screen's cancellation or quit action. [snug.py:436](../snug.py#L436), [snug.py:105](../snug.py#L105), [snug.py:949](../snug.py#L949).
+Full layout needs at least 80 columns and 24 rows. Compact layout needs at least 40 columns and 10 rows. Smaller terminals show a too-small message and accept cancellation. Escape keeps its current back action, including clearing a picker filter first. Ctrl+C keeps the screen's cancellation or quit action. [snug.py:465](../snug.py#L465), [snug.py:125](../snug.py#L125), [snug.py:1101](../snug.py#L1101), [snug.py:114](../snug.py#L114).
 
-Compact layout uses shorter hints and scrolls option lists around the selected row. Long text is clipped to the available cells. Result and error pauses show only the rows that fit; they have no scrolling or paging. [snug.py:547](../snug.py#L547), [snug.py:564](../snug.py#L564), [snug.py:451](../snug.py#L451), [snug.py:632](../snug.py#L632).
+Compact layout uses shorter hints and scrolls option lists around the selected row. It keeps action rows visible. Menu text is clipped to the available cells. [snug.py:541](../snug.py#L541), [snug.py:576](../snug.py#L576), [snug.py:593](../snug.py#L593), [snug.py:480](../snug.py#L480).
+
+Result and error pauses wrap messages and shorten long paths in the middle. Up, Down, Page Up, Page Down, Home and End scroll the details. An overflow row shows the hidden line count and visible range. The key footer stays on screen. [snug.py:732](../snug.py#L732), [snug.py:753](../snug.py#L753), [snug.py:769](../snug.py#L769), [snug.py:777](../snug.py#L777).
 
 ### Main menu and option menus
 
-The main menu offers creation, extraction, listing, information and integrity testing. Option menus use the same navigation. Single-key shortcuts activate immediately; they do not need Enter. [snug.py:2379](../snug.py#L2379), [snug.py:576](../snug.py#L576).
+The main menu offers creation, extraction, listing, information and integrity testing. Option menus use the same navigation. Single-key shortcuts activate immediately; they do not need Enter. [snug.py:2780](../snug.py#L2780), [snug.py:605](../snug.py#L605).
 
 | Screen | Keys | Action | Code |
 |---|---|---|---|
-| Main or option menu | Up, Down | Move the selected row. | [snug.py:577](../snug.py#L577) |
-| Main or option menu | Enter, shown single-key shortcut | Activate the row or shortcut. | [snug.py:581](../snug.py#L581) |
-| Main menu | Escape, q, Q, 0 | Quit with status 0. | [snug.py:584](../snug.py#L584), [snug.py:2435](../snug.py#L2435) |
-| Main menu | Ctrl+C | Quit with status 130. | [snug.py:2433](../snug.py#L2433) |
-| Option menu | Escape, q, Q, Ctrl+C | Leave the menu. A shown b shortcut goes Back. | [snug.py:130](../snug.py#L130), [snug.py:584](../snug.py#L584), [snug.py:1828](../snug.py#L1828), [snug.py:2275](../snug.py#L2275) |
+| Main or option menu | Up, Down | Move the selected row. | [snug.py:606](../snug.py#L606) |
+| Main or option menu | Enter, shown single-key shortcut | Activate the row or shortcut. | [snug.py:610](../snug.py#L610) |
+| Main menu | Escape, q, Q, 0 | Quit with status 0. | [snug.py:613](../snug.py#L613), [snug.py:2836](../snug.py#L2836) |
+| Main menu | Ctrl+C | Quit with status 130. | [snug.py:2834](../snug.py#L2834) |
+| Option menu | Escape, q, Q, Ctrl+C | Leave the menu. A shown b shortcut goes Back. | [snug.py:114](../snug.py#L114), [snug.py:613](../snug.py#L613), [snug.py:2061](../snug.py#L2061), [snug.py:2676](../snug.py#L2676) |
 
-Creation options show sources, output, installed writers, compression, password status and symlink policy. Extraction options show destination, members, overwrite, metadata, symlinks, stripping, password status and limits. Unsupported settings are marked unavailable. Password labels show only whether a password is set. [snug.py:1748](../snug.py#L1748), [snug.py:2201](../snug.py#L2201), [snug.py:1723](../snug.py#L1723).
+Creation options show sources, output, installed writers, compression, password status and symlink policy. Extraction options show destination, members, overwrite, metadata, symlinks, stripping, password status and limits. Unsupported settings are marked unavailable. Password labels show only whether a password is set. [snug.py:1981](../snug.py#L1981), [snug.py:2602](../snug.py#L2602), [snug.py:1956](../snug.py#L1956).
 
-The TUI calls the same archive engine as the CLI. [snug.py:1896](../snug.py#L1896), [snug.py:2302](../snug.py#L2302), [snug.py:2332](../snug.py#L2332), [snug.py:2674](../snug.py#L2674), [snug.py:2693](../snug.py#L2693).
+The TUI calls the same archive engine as the CLI. [snug.py:2243](../snug.py#L2243), [snug.py:2701](../snug.py#L2701), [snug.py:2731](../snug.py#L2731), [snug.py:3510](../snug.py#L3510), [snug.py:3543](../snug.py#L3543).
 
 ### Source picker and archive browser
 
-Creation opens a multi-select source picker. The archive path prompt opens a single-file browser with Tab. Cancelling that browser returns to the path prompt with its draft preserved. Choosing a file still checks that it is a file before continuing. [snug.py:1856](../snug.py#L1856), [snug.py:1570](../snug.py#L1570), [snug.py:1582](../snug.py#L1582), [snug.py:1589](../snug.py#L1589).
+Creation opens a multi-select source picker. The archive path prompt opens a single-file browser with Tab. Cancelling that browser returns to the path prompt with its draft preserved. Choosing a file still checks that it is a file before continuing. [snug.py:2253](../snug.py#L2253), [snug.py:1788](../snug.py#L1788), [snug.py:1811](../snug.py#L1811), [snug.py:1818](../snug.py#L1818).
 
 | Screen | Keys | Action | Code |
 |---|---|---|---|
-| Either picker | Up, Down | Move through visible entries. | [snug.py:966](../snug.py#L966) |
-| Either picker | Enter, Right | Open the highlighted directory. Enter retries a failed directory read. | [snug.py:925](../snug.py#L925), [snug.py:994](../snug.py#L994) |
-| Either picker | Left | Go to the parent. The source picker stops at its starting directory; the archive browser can go above it. | [snug.py:1014](../snug.py#L1014) |
-| Source picker | Space | Toggle a mark on the highlighted entry. | [snug.py:962](../snug.py#L962), [snug.py:1029](../snug.py#L1029) |
-| Source picker | Tab | Accept the marked set. Stay if nothing is marked. | [snug.py:923](../snug.py#L923), [snug.py:1053](../snug.py#L1053) |
-| Source picker | Enter on a file | Accept the marked set if there are marks; otherwise accept the highlighted file. | [snug.py:934](../snug.py#L934), [snug.py:1053](../snug.py#L1053) |
-| Archive browser | Enter on a file, Tab | Choose one highlighted file. Space does not mark entries. | [snug.py:1041](../snug.py#L1041), [snug.py:962](../snug.py#L962) |
-| Either picker | /, printable text | Start a name filter. q and Q cancel when no filter is active; while filtering they are text. | [snug.py:941](../snug.py#L941), [snug.py:976](../snug.py#L976) |
-| Either picker | Backspace | Remove the last filter character. | [snug.py:957](../snug.py#L957) |
-| Either picker | Escape | Clear active filter text or empty filter mode first. A second Escape cancels. | [snug.py:949](../snug.py#L949) |
-| Either picker | Ctrl+C | Cancel immediately, even while filtering. | [snug.py:1080](../snug.py#L1080) |
+| Either picker | Up, Down | Move through visible entries. | [snug.py:1121](../snug.py#L1121) |
+| Either picker | Enter, Right | Open the highlighted directory. Enter retries a failed directory read. | [snug.py:1080](../snug.py#L1080), [snug.py:1149](../snug.py#L1149) |
+| Either picker | Left | Go to the parent. The source picker stops at its starting directory; the archive browser can go above it. | [snug.py:1169](../snug.py#L1169) |
+| Source picker | Space | Toggle a mark on the highlighted entry. | [snug.py:1117](../snug.py#L1117), [snug.py:1184](../snug.py#L1184) |
+| Source picker | Tab | Accept the marked set. Stay if nothing is marked. | [snug.py:1078](../snug.py#L1078), [snug.py:1203](../snug.py#L1203) |
+| Source picker | Enter on a file | Accept the marked set if there are marks; otherwise accept the highlighted file. | [snug.py:1089](../snug.py#L1089), [snug.py:1203](../snug.py#L1203) |
+| Archive browser | Enter on a file, Tab | Choose one highlighted file. Space does not mark entries. | [snug.py:1196](../snug.py#L1196), [snug.py:1117](../snug.py#L1117) |
+| Either picker | /, printable text | Start a name filter. q and Q cancel when no filter is active; while filtering they are text. | [snug.py:1096](../snug.py#L1096), [snug.py:1131](../snug.py#L1131) |
+| Either picker | Backspace | Remove the last filter character. | [snug.py:1112](../snug.py#L1112) |
+| Either picker | Escape | Clear active filter text or empty filter mode first. A second Escape cancels. | [snug.py:1104](../snug.py#L1104) |
+| Either picker | Ctrl+C | Cancel immediately, even while filtering. | [snug.py:1244](../snug.py#L1244) |
 
-Marking a directory marks only that source entry, without marking each child. Creation still walks the selected directory. Directory symlinks listed in the picker are not opened. [snug.py:1029](../snug.py#L1029), [snug_core.py:924](../snug_core.py#L924), [snug.py:674](../snug.py#L674), [snug.py:1007](../snug.py#L1007).
+Marking a directory marks only that source entry, without marking each child. Creation still walks the selected directory. Directory symlinks listed in the picker are not opened. [snug.py:1184](../snug.py#L1184), [snug_core.py:957](../snug_core.py#L957), [snug.py:827](../snug.py#L827), [snug.py:1162](../snug.py#L1162).
 
-Filters compare names and filter text in NFC form, ignoring case. Selected paths keep their original spelling. [snug.py:795](../snug.py#L795), [snug.py:1033](../snug.py#L1033), [snug.py:1051](../snug.py#L1051).
+Filters compare names and filter text in NFC form, ignoring case. Selected paths keep their original spelling. [snug.py:950](../snug.py#L950), [snug.py:1188](../snug.py#L1188), [snug.py:1225](../snug.py#L1225).
 
 ### Archive members
 
-Members are exact archive names, as with CLI `--member`. Selecting a directory member does not select its descendants. [snug.py:1913](../snug.py#L1913), [snug.py:2302](../snug.py#L2302), [snug.py:2696](../snug.py#L2696), [snug_core.py:779](../snug_core.py#L779).
+Members are exact archive names, as with CLI `--member`. Selecting a directory member does not select its descendants. [snug.py:2310](../snug.py#L2310), [snug.py:2701](../snug.py#L2701), [snug.py:3546](../snug.py#L3546), [snug_core.py:819](../snug_core.py#L819).
 
 | Keys | Action | Code |
 |---|---|---|
-| Up, Down | Move between member and action rows. | [snug.py:1987](../snug.py#L1987) |
-| Space | Toggle the highlighted member; action rows are unchanged. | [snug.py:1996](../snug.py#L1996) |
-| Enter, shown single-key shortcut | Activate that member or action row. | [snug.py:1994](../snug.py#L1994), [snug.py:1999](../snug.py#L1999) |
-| a, n | Mark all members, or clear all marks. | [snug.py:1977](../snug.py#L1977) |
-| Tab, r | Use the selection. An empty selection stays on this screen. | [snug.py:1992](../snug.py#L1992), [snug.py:1971](../snug.py#L1971) |
-| Escape, b, q, Q, Ctrl+C | Discard changes and return to extraction options. | [snug.py:130](../snug.py#L130), [snug.py:1964](../snug.py#L1964), [snug.py:1990](../snug.py#L1990) |
+| Up, Down | Move between member and action rows. | [snug.py:2384](../snug.py#L2384) |
+| Space | Toggle the highlighted member; action rows are unchanged. | [snug.py:2393](../snug.py#L2393) |
+| Enter, shown single-key shortcut | Activate that member or action row. | [snug.py:2391](../snug.py#L2391), [snug.py:2396](../snug.py#L2396) |
+| a, n | Mark all members, or clear all marks. | [snug.py:2374](../snug.py#L2374) |
+| Tab, r | Use the selection. An empty selection stays on this screen. | [snug.py:2389](../snug.py#L2389), [snug.py:2368](../snug.py#L2368) |
+| Escape, b, q, Q, Ctrl+C | Discard changes and return to extraction options. | [snug.py:114](../snug.py#L114), [snug.py:2361](../snug.py#L2361), [snug.py:2387](../snug.py#L2387) |
 
 ### Extraction limits
 
-Limits apply to the current extraction review. Returning from the limits screen with Apply keeps those edits in that review. A new extraction starts with no limits enabled. [snug.py:2262](../snug.py#L2262), [snug.py:2294](../snug.py#L2294), [snug.py:2199](../snug.py#L2199), [snug_core.py:195](../snug_core.py#L195).
+Limits apply to the current extraction review. Returning from the limits screen with Apply keeps those edits in that review. A new extraction starts with no limits enabled. [snug.py:2663](../snug.py#L2663), [snug.py:2695](../snug.py#L2695), [snug.py:2600](../snug.py#L2600), [snug_core.py:235](../snug_core.py#L235).
 
 | Screen | Keys | Action | Code |
 |---|---|---|---|
-| Limits overview | Up, Down, Enter | Move and activate a row. | [snug.py:2136](../snug.py#L2136) |
-| Limits overview | e, s, f, r | Edit entry count, total bytes, bytes per member, or compression ratio. | [snug.py:2045](../snug.py#L2045), [snug.py:2147](../snug.py#L2147) |
-| Limits overview | Tab, a | Apply edits and return to extraction options. | [snug.py:2144](../snug.py#L2144) |
-| Limits overview | Escape, b, q, Q, Ctrl+C | Discard edits and return to extraction options. | [snug.py:130](../snug.py#L130), [snug.py:2137](../snug.py#L2137) |
-| Limit field | Printable text, Backspace | Append text or erase the last character. | [snug.py:2125](../snug.py#L2125) |
-| Limit field | Enter | Save a valid field value to the overview. Empty keeps the value; none clears it. Apply is still needed. | [snug.py:2108](../snug.py#L2108), [snug.py:2144](../snug.py#L2144) |
-| Limit field | Escape, Ctrl+C | Discard only this field draft and return to the overview. | [snug.py:130](../snug.py#L130), [snug.py:2103](../snug.py#L2103) |
+| Limits overview | Up, Down, Enter | Move and activate a row. | [snug.py:2533](../snug.py#L2533) |
+| Limits overview | e, s, f, r | Edit entry count, total bytes, bytes per member, or compression ratio. | [snug.py:2442](../snug.py#L2442), [snug.py:2544](../snug.py#L2544) |
+| Limits overview | Tab, a | Apply edits and return to extraction options. | [snug.py:2541](../snug.py#L2541) |
+| Limits overview | Escape, b, q, Q, Ctrl+C | Discard edits and return to extraction options. | [snug.py:114](../snug.py#L114), [snug.py:2534](../snug.py#L2534) |
+| Limit field | Printable text, Backspace | Append text or erase the last character. | [snug.py:2522](../snug.py#L2522) |
+| Limit field | Enter | Save a valid field value to the overview. Empty keeps the value; none clears it. Apply is still needed. | [snug.py:2505](../snug.py#L2505), [snug.py:2541](../snug.py#L2541) |
+| Limit field | Escape, Ctrl+C | Discard only this field draft and return to the overview. | [snug.py:114](../snug.py#L114), [snug.py:2500](../snug.py#L2500) |
 
-Size fields accept decimal K/KB and binary KiB units. Limit fields use a small append-and-backspace editor, rather than the line editor below. While editing a field, b, q and Q are text, not discard shortcuts. [snug_core.py:210](../snug_core.py#L210), [snug.py:2103](../snug.py#L2103), [snug.py:2132](../snug.py#L2132).
+Size fields accept decimal K/KB and binary KiB units. Limit fields use a small append-and-backspace editor, rather than the line editor below. While editing a field, b, q and Q are text, not discard shortcuts. [snug_core.py:250](../snug_core.py#L250), [snug.py:2500](../snug.py#L2500), [snug.py:2529](../snug.py#L2529).
 
 ### Line prompts and history
 
-TTY line prompts use Snug's editor. Escape and Ctrl+C cancel the current prompt. Ctrl+D on an empty line ends the session with status 0. Cancelling a setting keeps its previous value. Rejected archive paths are prefilled for editing; spaces in that path are preserved. [snug.py:1266](../snug.py#L1266), [snug.py:1466](../snug.py#L1466), [snug.py:2403](../snug.py#L2403), [snug.py:1777](../snug.py#L1777), [snug.py:1570](../snug.py#L1570), [snug.py:1589](../snug.py#L1589).
+TTY line prompts use Snug's editor. Escape and Ctrl+C cancel the current prompt. Ctrl+D on an empty line ends the session with status 0. Cancelling a setting keeps its previous value. Rejected archive paths are prefilled for editing; spaces in that path are preserved. [snug.py:1436](../snug.py#L1436), [snug.py:1681](../snug.py#L1681), [snug.py:2804](../snug.py#L2804), [snug.py:2010](../snug.py#L2010), [snug.py:1788](../snug.py#L1788), [snug.py:1818](../snug.py#L1818).
 
 | Keys | Action | Code |
 |---|---|---|
-| Printable text, Space | Insert at the cursor. | [snug.py:1317](../snug.py#L1317) |
-| Left, Right | Move the cursor. | [snug.py:1280](../snug.py#L1280) |
-| Home, Ctrl+A; End, Ctrl+E | Move to the start or end. | [snug.py:1276](../snug.py#L1276) |
-| Backspace | Delete before the cursor. | [snug.py:1284](../snug.py#L1284) |
-| Delete, Ctrl+D on a nonempty line | Delete at the cursor. | [snug.py:1287](../snug.py#L1287) |
-| Ctrl+K | Delete from the cursor to the end. | [snug.py:1289](../snug.py#L1289) |
-| Ctrl+U | Delete before the cursor. | [snug.py:1291](../snug.py#L1291) |
-| Ctrl+W | Delete the preceding whitespace and word. | [snug.py:1294](../snug.py#L1294) |
-| Up, Down | Recall history for this prompt kind; Down can restore the current draft. | [snug.py:1303](../snug.py#L1303) |
-| Enter | Submit the line. | [snug.py:1267](../snug.py#L1267) |
-| Escape, Ctrl+C | Cancel the prompt. | [snug.py:1267](../snug.py#L1267), [snug.py:1470](../snug.py#L1470) |
-| Ctrl+D on an empty line | End the session with status 0. | [snug.py:1269](../snug.py#L1269), [snug.py:1466](../snug.py#L1466), [snug.py:2403](../snug.py#L2403) |
-| Tab in the archive path prompt | Browse for one file. | [snug.py:1572](../snug.py#L1572) |
+| Printable text, Space | Insert at the cursor. | [snug.py:1501](../snug.py#L1501) |
+| Left, Right | Move the cursor. | [snug.py:1454](../snug.py#L1454) |
+| Home, Ctrl+A; End, Ctrl+E | Move to the start or end. | [snug.py:1456](../snug.py#L1456) |
+| Backspace | Delete before the cursor. | [snug.py:1460](../snug.py#L1460) |
+| Delete, Ctrl+D on a nonempty line | Delete at the cursor. | [snug.py:1463](../snug.py#L1463) |
+| Ctrl+K | Delete from the cursor to the end. | [snug.py:1465](../snug.py#L1465) |
+| Ctrl+U | Delete before the cursor. | [snug.py:1467](../snug.py#L1467) |
+| Ctrl+W | Delete the preceding whitespace and word. | [snug.py:1470](../snug.py#L1470) |
+| Up, Down | Recall history for this prompt kind; Down can restore the current draft. | [snug.py:1486](../snug.py#L1486) |
+| Enter | Submit the line. | [snug.py:1437](../snug.py#L1437) |
+| Escape, Ctrl+C | Cancel the prompt. | [snug.py:1437](../snug.py#L1437), [snug.py:1685](../snug.py#L1685) |
+| Ctrl+D on an empty line | End the session with status 0. | [snug.py:1439](../snug.py#L1439), [snug.py:1681](../snug.py#L1681), [snug.py:2804](../snug.py#L2804) |
+| Tab in the archive path prompt | Browse for one file. | [snug.py:1792](../snug.py#L1792) |
 
-Submitted nonempty lines are kept in memory by prompt kind for this process. Prompt history is not written to disk. TTY prompts do not use readline history, Ctrl+R reverse search, Ctrl+V quoted insertion, ~/.inputrc bindings, or vi mode. [snug.py:1396](../snug.py#L1396), [snug.py:1402](../snug.py#L1402), [snug.py:1437](../snug.py#L1437), [snug.py:1461](../snug.py#L1461), [snug.py:312](../snug.py#L312), [snug.py:384](../snug.py#L384).
+Submitted nonempty lines are kept in memory by prompt kind for this process. Prompt history is not written to disk. TTY prompts do not use readline history, Ctrl+R reverse search, Ctrl+V quoted insertion, ~/.inputrc bindings, or vi mode. [snug.py:1591](../snug.py#L1591), [snug.py:1640](../snug.py#L1640), [snug.py:1631](../snug.py#L1631), [snug.py:1676](../snug.py#L1676), [snug.py:336](../snug.py#L336), [snug.py:413](../snug.py#L413).
 
 ### Results, errors and interrupts
 
@@ -137,23 +139,23 @@ Submitted nonempty lines are kept in memory by prompt kind for this process. Pro
 | Up, Down | Scroll result and error details one line. | [snug.py:777](../snug.py#L777) |
 | PgUp, PgDn | Scroll one page. | [snug.py:777](../snug.py#L777) |
 | Home, End | Show the first or last page. | [snug.py:777](../snug.py#L777) |
-| Enter, Escape, Ctrl+C | Dismiss a result or error pause and return to the main menu. | [snug.py:777](../snug.py#L777), [snug.py:114](../snug.py#L114), [snug.py:2761](../snug.py#L2761) |
+| Enter, Escape, Ctrl+C | Dismiss a result or error pause and return to the main menu. | [snug.py:777](../snug.py#L777), [snug.py:114](../snug.py#L114), [snug.py:2798](../snug.py#L2798) |
 
-Results show status and counts before warning details. Error causes and messages wrap; long paths shorten in the middle to keep the end of the filename visible. When details exceed the screen, a reserved row reports the hidden line count and the visible range; the key footer stays on screen at 80×24 and 40×10. [snug.py:2096](../snug.py#L2096), [snug.py:2104](../snug.py#L2104), [snug.py:2111](../snug.py#L2111), [snug.py:663](../snug.py#L663), [snug.py:690](../snug.py#L690), [snug.py:753](../snug.py#L753).
+Create, extract and test results show status and counts before warning details. Error causes and messages wrap; long paths shorten in the middle to keep the end of the filename visible. When details exceed the screen, a reserved row reports the hidden line count and the visible range; the key footer stays on screen at 80×24 and 40×10. [snug.py:2132](../snug.py#L2132), [snug.py:2140](../snug.py#L2140), [snug.py:2148](../snug.py#L2148), [snug.py:663](../snug.py#L663), [snug.py:690](../snug.py#L690), [snug.py:753](../snug.py#L753).
 
-Ctrl+C acts like Escape in option menus, members, limits and line prompts. In either picker it cancels immediately, while Escape clears filtering first. At the main menu Ctrl+C quits with status 130. [snug.py:114](../snug.py#L114), [snug.py:1644](../snug.py#L1644), [snug.py:1063](../snug.py#L1063), [snug.py:1211](../snug.py#L1211), [snug.py:2787](../snug.py#L2787).
+Ctrl+C acts like Escape in option menus, members, limits and line prompts. In either picker it cancels immediately, while Escape clears filtering first. At the main menu Ctrl+C quits with status 130. [snug.py:114](../snug.py#L114), [snug.py:1665](../snug.py#L1665), [snug.py:1075](../snug.py#L1075), [snug.py:1232](../snug.py#L1232), [snug.py:2824](../snug.py#L2824).
 
-During TUI create, extract or test, Ctrl+C cancels the operation, shows a result pause and returns to the menu after dismissal. Before create publication, no archive is created and any existing archive is unchanged. If the output changed before cancellation, the pause says the current archive was kept and may already have been published; if its state cannot be verified, it asks you to check the output path. Extraction keeps files already published and removes unfinished staging where possible. Test makes no file changes. A second Ctrl+C during engine cleanup is ignored until cleanup finishes; the previous interrupt handler is then restored. CLI operation interrupts still exit 130. [snug.py:2120](../snug.py#L2120), [snug.py:2132](../snug.py#L2132), [snug.py:2143](../snug.py#L2143), [snug.py:2162](../snug.py#L2162), [snug.py:2180](../snug.py#L2180), [snug.py:4055](../snug.py#L4055).
+During TUI create, extract or test, Ctrl+C cancels the operation, shows a result pause and returns to the menu after dismissal. Before create publication, no archive is created and any existing archive is unchanged. If the output changed before cancellation, the pause says the current archive was kept and may already have been published; if its state cannot be verified, it asks you to check the output path. Extraction keeps files already published and removes unfinished staging where possible. Test makes no file changes. A second Ctrl+C during engine cleanup is ignored until cleanup finishes; the previous interrupt handler is then restored. CLI operation interrupts still exit 130. [snug.py:2157](../snug.py#L2157), [snug.py:2169](../snug.py#L2169), [snug.py:2180](../snug.py#L2180), [snug.py:2199](../snug.py#L2199), [snug.py:2217](../snug.py#L2217), [snug.py:4115](../snug.py#L4115).
 
-TUI progress uses the CLI completion rules: unknown byte totals stay indeterminate until success; skipped work reaches completion without claiming skipped bytes were processed. The progress line fits the screen by terminal cell width. [snug.py:3107](../snug.py#L3107), [snug.py:2976](../snug.py#L2976), [snug.py:3049](../snug.py#L3049).
+TUI progress uses the CLI completion rules: unknown byte totals stay indeterminate until success; skipped work reaches completion without claiming skipped bytes were processed. The progress line fits the screen by terminal cell width. [snug.py:3144](../snug.py#L3144), [snug.py:3013](../snug.py#L3013), [snug.py:3086](../snug.py#L3086).
 
-Passwords use the CLI's secure getpass prompt, not this line editor. Ctrl+C at that prompt can still end the session with status 130. Source enumeration before creation can be cancelled with Escape, q, Q or Ctrl+C. [snug.py:1833](../snug.py#L1833), [snug.py:2809](../snug.py#L2809), [snug.py:1341](../snug.py#L1341).
+Passwords use the CLI's secure getpass prompt, not this line editor. Ctrl+C at that prompt can still end the session with status 130. Source enumeration before creation can be cancelled with Escape, q, Q or Ctrl+C. [snug.py:1866](../snug.py#L1866), [snug.py:2846](../snug.py#L2846), [snug.py:1362](../snug.py#L1362).
 
-Extraction is transactional per regular file. Files are staged and published after decoding succeeds. A later publication failure can leave earlier files, directories or links in place. There is no whole-archive rollback. [snug_core.py:1152](../snug_core.py#L1152), [snug_core.py:2326](../snug_core.py#L2326).
+Extraction is transactional per regular file. Files are staged and published after decoding succeeds. A later publication failure can leave earlier files, directories or links in place. There is no whole-archive rollback. [snug_core.py:1198](../snug_core.py#L1198), [snug_core.py:2409](../snug_core.py#L2409).
 
 ### Piped and non-TTY input
 
-With no arguments, Snug requires both standard input and standard output to be terminals. If either stream is piped, redirected or otherwise non-TTY, Snug prints command-line help and exits with status 1 without starting the menu. Use an explicit CLI command for non-interactive operation. [snug.py:3270](../snug.py#L3270), [snug.py:2463](../snug.py#L2463).
+With no arguments, Snug requires both standard input and standard output to be terminals. If either stream is piped, redirected or otherwise non-TTY, Snug prints command-line help and exits with status 1 without starting the menu. Use an explicit CLI command for non-interactive operation. [snug.py:4143](../snug.py#L4143), [snug.py:2864](../snug.py#L2864).
 
 ## Paths inserted by terminals
 
@@ -213,11 +215,11 @@ Snug streams large regular-file payloads and supports ZIP64. In a terminal, CLI 
 
 CLI progress uses stderr's terminal width. It drops speed below 80 columns, ETA or elapsed time below 60, and the bar below 40. Fields also drop when the counter needs more space. Narrow layouts shorten units and operation names to retain the counter. Member names are shortened by terminal cell width. Non-terminal stderr receives only the final progress line. `-q` suppresses progress.
 
-If an input is omitted because of an error, Snug warns on stderr with its path and cause, even with `-q`. It prints the first 20 accidental skips and a count of any remaining skips. A published partial archive returns status 5, including when stderr is closed. The final warning gives the included and skipped input counts. [snug.py:1948](../snug.py#L1948), [snug.py:3191](../snug.py#L3191), [snug.py:3232](../snug.py#L3232).
+If an input is omitted because of an error, Snug warns on stderr with its path and cause, even with `-q`. It prints the first 20 accidental skips and a count of any remaining skips. A published partial archive returns status 5, including when stderr is closed. The final warning gives the included and skipped input counts. [snug.py:2097](../snug.py#L2097), [snug.py:3490](../snug.py#L3490), [snug.py:3531](../snug.py#L3531).
 
-An accidental skip prevents replacement of an existing archive, including with `--force`. Snug discards its temporary file, preserves the existing archive, and returns status 2. If no inputs could be included because of errors, Snug returns status 2 and publishes no archive. Some backends abort on input read errors instead of continuing with a partial archive. [snug_core.py:2247](../snug_core.py#L2247), [snug.py:3812](../snug.py#L3812).
+An accidental skip prevents replacement of an existing archive, including with `--force`. Snug discards its temporary file, preserves the existing archive, and returns status 2. If no inputs could be included because of errors, Snug returns status 2 and publishes no archive. Some backends abort on input read errors instead of continuing with a partial archive. [snug_core.py:2365](../snug_core.py#L2365), [snug.py:4112](../snug.py#L4112).
 
-Intentional omissions keep status 0. These include `--symlinks skip`, unsupported source types, and duplicate names that refer to the same real file. Different files with the same archive name cause an accidental skip. If file identity cannot be determined, Snug keeps the existing silent deduplication behavior. [snug_core.py:942](../snug_core.py#L942), [snug.py:3237](../snug.py#L3237).
+Intentional omissions keep status 0. These include `--symlinks skip`, unsupported source types, and duplicate names that refer to the same real file. Different files with the same archive name cause an accidental skip. If file identity cannot be determined, Snug keeps the existing silent deduplication behavior. [snug_core.py:944](../snug_core.py#L944), [snug.py:3536](../snug.py#L3536).
 
 ## Extract archives
 
@@ -385,8 +387,8 @@ Checks report the latest stable release; only `snug update` requests installatio
 | `2` | Invalid CLI arguments, an archive/format/I/O error, or unhealthy required components reported by `doctor`. |
 | `3` | Extraction or integrity testing rejected an unsafe archive. |
 | `4` | An explicit extraction resource limit was exceeded. |
-| `5` | An archive was created but is incomplete because inputs were skipped due to errors. [snug.py:3512](../snug.py#L3512). |
-| `130` | CLI command interrupted. TUI main-menu and secure-password interruptions can exit with 130. Ctrl+C during TUI create, extract, or test shows a cancellation pause and returns to the menu. [snug.py:2231](../snug.py#L2231), [snug.py:2832](../snug.py#L2832), [snug.py:2859](../snug.py#L2859). |
+| `5` | An archive was created but is incomplete because inputs were skipped due to errors. [snug.py:3535](../snug.py#L3535). |
+| `130` | CLI command interrupted. TUI main-menu and secure-password interruptions can exit with 130. Ctrl+C during TUI create, extract, or test shows a cancellation pause and returns to the menu. [snug.py:2232](../snug.py#L2232), [snug.py:2833](../snug.py#L2833), [snug.py:2860](../snug.py#L2860). |
 
 Archive command errors start with `error:` on stderr. They identify the archive and the file or member when available. They state the cause and give a next step where one is clear. Interrupted CLI operations return status 130. Active progress ends before an error or interruption message.
 

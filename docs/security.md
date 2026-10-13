@@ -22,7 +22,7 @@ Symbolic-link targets must be nonempty relative paths, without absolute/drive pa
 
 ZIP and 7z symlink payloads are limited to 64 KiB. 7z symlinks are deferred until data writers have closed. `--symlinks skip` omits symbolic links when they are unnecessary; it does not disable all archive validation or apply to hardlinks. Junction extraction through py7zr is rejected.
 
-Hardlink names undergo member-path and containment checks with the same stripping policy. Regular-file publication precedes deferred hardlink restoration, and the resolved source must be an existing regular file within the destination. Missing sources and self-links are skipped; selective extraction and hardlink-chain ordering can affect restoration. Thin AR is rejected because its members reference external files.
+Hardlink names undergo member-path and containment checks with the same stripping policy. Regular-file publication precedes deferred hardlink restoration, and the resolved source must be an existing regular file within the destination. TAR hardlink targets must name earlier archive members. `test` and `extract` reject missing or later targets with status 2. Valid chains of earlier hardlinks can be restored. A selected TAR hardlink whose source is excluded or stripped is skipped with a warning. [TAR validation](../snug_core.py#L1083), [omitted-source warnings](../snug_core.py#L1095), [restoration order](../snug_core.py#L2449). Thin AR is rejected because its members reference external files.
 
 ## Special files, overwrites, and metadata
 
