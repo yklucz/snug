@@ -106,10 +106,11 @@ def test_hardlink_source_existing_symlink_rejected(engine, tmp_path):
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"platform cannot create symlinks: {exc}")
     archive = tmp_path / "bad.tar"
-    write_archive(archive, [("copy", "hardlink", "source")])
+    write_archive(archive, [("source", "file", b"archive"), ("copy", "hardlink", "source")])
     with pytest.raises(snug.UnsafeArchiveError):
-        engine.extract(archive, dest)
+        engine.extract(archive, dest, overwrite=False)
     assert not (dest / "copy").exists()
+    assert outside.read_bytes() == b"original"
 
 
 def test_safe_hardlinks_and_symlinks(engine, tmp_path):
@@ -200,8 +201,6 @@ def test_self_hardlink_preserves_existing_source(engine, tmp_path):
     dest.mkdir()
     source = dest / "file"
     source.write_bytes(b"keep this file")
-    try:
+    with pytest.raises(snug.ArchiveError, match="missing target.*earlier"):
         engine.extract(archive, dest)
-    except snug.UnsafeArchiveError:
-        pass
     assert source.read_bytes() == b"keep this file"

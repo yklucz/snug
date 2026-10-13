@@ -2141,6 +2141,7 @@ def _print_menu_extract_result(report: ExtractReport) -> None:
     print("  Extraction complete.")
     print(f"  {report.total} included, {len(report.skipped)} skipped.")
     _print_extract_summary(report)
+    _print_extract_warnings(report)
     _print_menu_skipped(report.skipped)
 
 
@@ -3354,9 +3355,23 @@ def _cli_corruption_error(chain: Sequence[BaseException]) -> str | None:
     return None
 
 
+_CREATE_SKIP_ADVICE = "check file permissions or exclude unreadable inputs"
+
+
+def _cli_recovery_message(exc: BaseException) -> str:
+    message = str(exc)
+    if (isinstance(exc, CreateError) and exc.report.accidental_skips
+            and message.startswith(("cannot create archive ", "cannot replace archive "))):
+        return f"{message}; {_CREATE_SKIP_ADVICE}"
+    if message.startswith("cannot atomically replace directory with file:"):
+        return (f"{message}; extract into an empty directory, or rename or remove "
+                "the existing directory")
+    return message
+
+
 def _cli_archive_error(args, exc: BaseException, member: str,
                        chain: Sequence[BaseException]) -> str:
-    message = str(exc)
+    message = _cli_recovery_message(exc)
     context = _cli_error_context(args, member)
     if isinstance(exc, ResourceLimitError):
         return f"{context}: {message}; {_cli_limit_advice(message)}"
@@ -3426,6 +3441,14 @@ def _print_extract_summary(report: ExtractReport) -> None:
     print(f"  avg speed  : {human_bytes(report.avg_speed)}/s")
     if report.skipped:
         print(f"  skipped    : {len(report.skipped)} item(s)")
+
+
+def _print_extract_warnings(report: ExtractReport, *,
+                            emit: Callable[[str], None] | None = None) -> None:
+    if emit is None:
+        emit = lambda message: print(message, file=sys.stderr)
+    for warning in report.warnings:
+        emit(f"warning: {_safe(warning)}")
 
 
 def _print_test_summary(report: TestReport) -> None:
@@ -3508,7 +3531,7 @@ def _cmd_create(args, engine: ArchiveEngine) -> int:
     if report.accidental_skips:
         _emit_cli_create_warning(
             f"warning: archive is incomplete: {report.included_inputs} included, "
-            f"{report.accidental_skips} skipped")
+            f"{report.accidental_skips} skipped; {_CREATE_SKIP_ADVICE}")
         return 5
     return 0
 
@@ -3532,6 +3555,7 @@ def _cmd_extract(args, engine: ArchiveEngine) -> None:
         display.finish(len(report.skipped))
     finally:
         display.abort()
+    _print_extract_warnings(report, emit=_emit_cli_create_warning)
     if args.quiet:
         return
     _print_extract_summary(report)

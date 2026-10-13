@@ -231,6 +231,8 @@ snug extract image.iso -C image-files/ --symlinks skip
 
 The default destination is the current directory. Regular files replace existing file/link targets only after their payloads succeed; a regular-file member cannot replace a conflicting directory. Prefer a new destination or use `--no-overwrite` when existing content must be retained.
 
+TAR hardlink targets must exist among earlier archive members. A missing or later target is a corrupt archive and returns exit 2 before the destination is created. The check uses the full archive list and the extractor's name cleaning. If a selected link's target exists but is excluded by member selection or removed by `--strip-components`, Snug skips the link with a stderr warning naming both paths. The warning remains visible with `-q`, and exit stays 0. [Hardlink validation](../snug_core.py#L1083), [selection and strip handling](../snug_core.py#L1095), [warning output](../snug.py#L3558).
+
 Snug extracts regular files into temporary sibling files and commits each completed file atomically where supported. This prevents incomplete regular files from appearing at their final paths. Publication starts after decoding and archive closure succeed. A later commit failure can leave earlier completed files, directories, or links in place; extraction has no whole-operation rollback. See [Security](security.md#temporary-files-and-backend-authority) for filesystem and interruption limits.
 
 | Option | Behavior |
@@ -319,6 +321,8 @@ snug test notes.txt.xz --quiet
 `test` consumes real payloads without creating extracted files. ZIP regular-file and symlink payloads are read fully to verify CRCs; TAR regular files and standalone streams are fully decoded; 7z uses a counting null-sink writer; libarchive consumes regular-file blocks. Compressed TAR trailers are also read. Payload transfers are bounded, although codecs retain their own memory requirements.
 
 Success reports entry/file counts, decoded size, and `Archive is OK.` Failures identify the member when available and report the decoder or validation error. `--quiet` suppresses progress and the success summary. CLI progress for unknown totals stays indeterminate until decoding finishes. Unsafe member structures are rejected before payload testing.
+
+TAR hardlinks are checked against earlier archive members before payload testing. A missing or later target fails with exit 2 and advice to obtain a complete copy. `list` and `info` can still inspect these archives. [Test preflight](../snug_core.py#L2293), [diagnostic inspection](../snug_core.py#L2258).
 
 Testing verifies only what the format and decoder can establish. Plain TAR and other formats without payload checksums cannot detect every content change, and a successful test is neither an authenticity check nor a malware scan. `test` does not recursively test archives stored as members.
 

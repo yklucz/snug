@@ -1038,6 +1038,7 @@ class ExtractReport:
     bytes_written: int = 0
     elapsed: float = 0.0
     skipped: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -1079,6 +1080,39 @@ class ArchiveInspection:
     metadata: dict
 
 
+def _validate_tar_hardlinks(entries: Sequence[ArchiveEntry]) -> None:
+    """Hardlinks refer to earlier members, using extraction name cleaning."""
+    earlier: set[tuple[str, ...]] = set()
+    for entry in entries:
+        if entry.is_hardlink and tuple(_clean_parts(entry.link_target or "")) not in earlier:
+            raise ArchiveError(
+                f"hardlink {entry.name!r} has missing target {entry.link_target!r} "
+                "among earlier archive members; obtain a complete copy of the archive"
+            )
+        earlier.add(tuple(_clean_parts(entry.name)))
+
+
+def _omitted_hardlink_warnings(entries: Sequence[ArchiveEntry], members, strip: int) -> dict[str, str]:
+    """Resolve omitted sources from full archive order before touching disk."""
+    unavailable: dict[tuple[str, ...], str | None] = {}
+    warnings: dict[str, str] = {}
+    for entry in entries:
+        parts = tuple(_clean_parts(entry.name))
+        if not _selected(entry.name, members):
+            reason = "target is not selected"
+        elif len(parts) <= strip:
+            reason = "target was removed by --strip-components"
+        elif entry.is_hardlink:
+            reason = unavailable.get(tuple(_clean_parts(entry.link_target or "")))
+            if reason:
+                warnings[entry.name] = f"hardlink {entry.name!r} -> {entry.link_target!r} skipped: {reason}"
+                reason = "target was not extracted because its hardlink source was omitted"
+        else:
+            reason = None
+        unavailable[parts] = reason
+    return warnings
+
+
 def _validate_symlink_target(entry: ArchiveEntry, parts: list[str]) -> None:
     link = (entry.link_target or "").replace("\\", "/")
     if not link or link.startswith("/") or _DRIVE_RE.match(link) or "\0" in link:
@@ -1111,6 +1145,15 @@ def _register_output_path(entry: ArchiveEntry, parts: list[str],
     parents.update(key[:length] for length in range(1, len(key)))
 
 
+def _validate_hardlink_target(entry: ArchiveEntry) -> None:
+    try:
+        _clean_parts(entry.link_target or "")
+    except UnsafeArchiveError as exc:
+        raise UnsafeArchiveError(
+            f"unsafe hardlink {entry.name!r} -> {entry.link_target!r}: {exc}"
+        ) from exc
+
+
 def _validate_structure(entries: Sequence[ArchiveEntry], members=None, strip: int = 0,
                         *, symlinks: str = "store") -> None:
     """Validate names and selected output collisions without touching disk."""
@@ -1119,7 +1162,7 @@ def _validate_structure(entries: Sequence[ArchiveEntry], members=None, strip: in
     for entry in entries:
         parts = _clean_parts(entry.name)
         if entry.is_hardlink:
-            _clean_parts(entry.link_target or "")
+            _validate_hardlink_target(entry)
         if not _selected(entry.name, members):
             continue
         parts = parts[strip:]
@@ -1149,6 +1192,7 @@ class _ExtractContext:
     deferred_dirs: list[tuple[Path, int | None, float | None]] = field(default_factory=list)
     pending_outputs: list[SafeOutputFile] = field(default_factory=list)
     deferred_hardlinks: list[tuple[ArchiveEntry, Path, str | None]] = field(default_factory=list)
+    hardlink_warnings: dict[str, str] = field(default_factory=dict)
 
 
 class SafeOutputFile:
@@ -1331,6 +1375,11 @@ def _extract_symlink_entry(ctx: _ExtractContext, entry: ArchiveEntry, target: Pa
 
 def _extract_hardlink(ctx: _ExtractContext, entry: ArchiveEntry, target: Path,
                       hardlink: str | None) -> None:
+    warning = ctx.hardlink_warnings.get(entry.name)
+    if warning:
+        ctx.report.skipped.append(entry.name)
+        ctx.report.warnings.append(warning)
+        return
     ctx.deferred_hardlinks.append((entry, target, hardlink))
 
 
@@ -1483,6 +1532,8 @@ class NativeBackend:
                 # A tolerant fallback may read local records from a truncated
                 # ZIP while silently accepting its missing central directory.
                 raise ArchiveError(f"invalid ZIP structure: {exc}") from exc
+            except PermissionError:
+                raise
             except OSError:
                 return False
         return False
@@ -2250,6 +2301,8 @@ class ArchiveEngine:
                           else backend.inspect(path, password=password))
             entries = inspection.entries
             _validate_structure(entries)
+            if fmt in _TAR_WRITE_MODE:
+                _validate_tar_hardlinks(entries)
             payload = [entry for entry in entries if not (entry.is_dir or entry.is_hardlink or entry.is_special)]
             progress.start(sum(entry.size for entry in payload) if all(entry.size_known for entry in payload) else 0,
                            len(entries))
@@ -2376,6 +2429,10 @@ class ArchiveEngine:
                 inspection = backend.inspect(path, password=password)
             entries = inspection.entries
             _validate_structure(entries, selected_members, strip_components, symlinks=symlinks)
+            hardlink_warnings = {}
+            if fmt in _TAR_WRITE_MODE and any(entry.is_hardlink for entry in entries):
+                _validate_tar_hardlinks(entries)
+                hardlink_warnings = _omitted_hardlink_warnings(entries, selected_members, strip_components)
             budget.preflight([entry for entry in entries if _selected(entry.name, selected_members)])
             dest = Path(destination)
             dest.mkdir(parents=True, exist_ok=True)
@@ -2384,7 +2441,8 @@ class ArchiveEngine:
                 dest_real=Path(os.path.realpath(dest)),
                 members=selected_members, budget=budget, inspection=inspection,
                 overwrite=overwrite, preserve_metadata=preserve_metadata,
-                symlinks=symlinks, strip=strip_components, report=report, progress=progress)
+                symlinks=symlinks, strip=strip_components, report=report, progress=progress,
+                hardlink_warnings=hardlink_warnings)
             start = time.monotonic()
             try:
                 backend.extract(path, ctx, password=password)

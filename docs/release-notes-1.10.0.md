@@ -45,4 +45,11 @@
 
 - Supported: macOS on Apple Silicon and Linux. Intel Macs may work but are no longer tested.
 
+## 1.10C.2
+
+- v1.9.0 and earlier could print `Archive is OK.` for a TAR hardlink whose target was missing. `test` and `extract` now reject targets absent from earlier archive members with exit 2. Extraction fails before creating its destination. `list` and `info` remain available for diagnosis. [Hardlink checks](../snug_core.py#L1083); `tests/test_tar_hardlinks.py`.
+- A selected TAR hardlink whose target is excluded or removed by `--strip-components` is skipped with a stderr warning naming both paths. Exit remains 0. The warning is visible with `-q`. [Selection warnings](../snug_core.py#L1095), [warning output](../snug.py#L3558).
+- All-skipped creation, preserved partial replacement, and published incomplete creation now advise checking file permissions or excluding unreadable inputs. Directory conflicts advise using an empty destination or renaming or removing the existing directory. Unsafe hardlink errors now name the originating member and its target. Their exit codes are unchanged. [Error advice](../snug.py#L3361), [incomplete warning](../snug.py#L3531), [hardlink context](../snug_core.py#L1148); `tests/test_c2_error_advice.py`.
+- An unreadable ZIP now reports a permission error and advice even when libarchive is unavailable. It previously could report an unsupported format. [ZIP probing](../snug_core.py#L1523); `tests/test_zip_permissions.py`.
+
 See [Usage](usage.md) for the current error, pipe, and progress contracts.
