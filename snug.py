@@ -812,9 +812,21 @@ def _wait_for_enter() -> None:
 #  File picker (arrow-key source selection)
 # =========================================================================== #
 
+def _path_probe(check: Callable[[], bool]) -> tuple[bool, OSError | None]:
+    """Keep input classification failures separate from a usable path."""
+    try:
+        return check(), None
+    except OSError as exc:
+        return False, exc
+
+
+def _path_usable(check: Callable[[], bool]) -> bool:
+    return _path_probe(check)[0]
+
+
 def _is_enterable(path: Path) -> bool:
     """True for directories we can navigate into (not symlinks to dirs)."""
-    return path.is_dir() and not path.is_symlink()
+    return _path_usable(lambda: path.is_dir() and not path.is_symlink())
 
 
 def _list_dir_entries(path: Path) -> list[Path]:
@@ -841,7 +853,7 @@ def _visible_range(total: int, cursor: int, rows: int) -> tuple[int, int]:
 def _entry_name(entry: Path) -> str:
     if _is_enterable(entry):
         return _safe(entry.name) + "/  ▸"
-    if entry.is_symlink():
+    if _path_usable(entry.is_symlink):
         return _safe(entry.name) + "@"
     return _safe(entry.name)
 
@@ -1031,7 +1043,7 @@ class _PickerScreen:
         name = _entry_name(entry)
         if _is_enterable(entry):
             name = _paint(name, _C.BOLD_BLUE)
-        elif entry.is_symlink():
+        elif _path_usable(entry.is_symlink):
             name = _paint(name, _C.CYAN)
         if self.single:
             return f"  {cursor_marker} {name}"
@@ -1150,7 +1162,7 @@ class _PickerScreen:
     def _can_enter(self, target: Path) -> bool:
         # A listed directory can disappear before the key arrives. Attempt its
         # read so the failure is visible, while still refusing live symlinks.
-        return (_is_enterable(target)
+        return _path_usable(lambda: (target.is_dir() and not target.is_symlink())
                 or (target in self._directories and not target.exists()
                     and not target.is_symlink()))
 
@@ -1187,12 +1199,7 @@ class _PickerScreen:
                 self._notice = "No file highlighted."
                 return False
             target = visible[self.cursor]
-            if target.is_dir():
-                self._notice = ("Symlinked directories stay closed." if target.is_symlink()
-                                else "Choose a file; Enter/→ opens dirs.")
-                return False
-            self.result = [target]
-            return True
+            return self._confirm_single_target(target)
         if self.marked:
             self.result = sorted(self.marked, key=str)
             return True
@@ -1203,6 +1210,20 @@ class _PickerScreen:
             return True
         self._notice = "Nothing marked. Space marks; Tab OK."
         return False
+
+    def _confirm_single_target(self, target: Path) -> bool:
+        directory, error = _path_probe(target.is_dir)
+        symlink, link_error = _path_probe(target.is_symlink)
+        error = error or link_error
+        if error is not None:
+            self._notice = _cli_os_reason(error, output=False)
+            return False
+        if directory:
+            self._notice = ("Symlinked directories stay closed." if symlink
+                            else "Choose a file; Enter/→ opens dirs.")
+            return False
+        self.result = [target]
+        return True
 
     def _cancel(self) -> None:
         self.result = None
@@ -1685,7 +1706,7 @@ def _find_archives(directory: Path) -> list[Path]:
         return []
     found = []
     for path in candidates:
-        if not path.is_file():
+        if not _path_usable(path.is_file):
             continue
         if path.name.lower().endswith(_ARCHIVE_SUFFIXES):
             found.append(path)
@@ -1711,7 +1732,24 @@ def _build_archive_options(found: list[Path]) -> list[tuple[str, str]]:
     return options
 
 
-def _manual_path_error(raw: str) -> list[str]:
+def _manual_path_details(raw: str, error: OSError | None) -> list[str]:
+    lines: list[str] = []
+    leading = len(raw) - len(raw.lstrip(" "))
+    trailing = len(raw) - len(raw.rstrip(" "))
+    if leading or trailing:
+        lines.extend((f"Leading spaces: {leading}", f"Trailing spaces: {trailing}"))
+    stripped = raw.strip()
+    hint, hint_error = _path_probe(lambda: bool(stripped and stripped != raw
+                                   and not Path(raw).exists() and Path(stripped).exists()))
+    if hint:
+        lines.append("Hint: the stripped path exists.")
+    error = error or hint_error
+    if error is not None:
+        lines.append(_cli_os_reason(error, output=False))
+    return lines
+
+
+def _manual_path_error(raw: str, error: OSError | None = None) -> list[str]:
     """Leave bounded rejection context visible while the next line is read."""
     tty = sys.stdin.isatty() and sys.stdout.isatty()
     cols, rows = _term_size()
@@ -1719,13 +1757,7 @@ def _manual_path_error(raw: str) -> list[str]:
     if tty:
         shown = _tui_truncate(shown, max(0, cols - 13))
     lines = ["Not a file.", f'Rejected: "{shown}"']
-    leading = len(raw) - len(raw.lstrip(" "))
-    trailing = len(raw) - len(raw.rstrip(" "))
-    if leading or trailing:
-        lines.extend((f"Leading spaces: {leading}", f"Trailing spaces: {trailing}"))
-    stripped = raw.strip()
-    if stripped and stripped != raw and not Path(raw).exists() and Path(stripped).exists():
-        lines.append("Hint: the stripped path exists.")
+    lines.extend(_manual_path_details(raw, error))
     lines.extend(("Edit the path below." if tty else "Rejected text is read-only.",
                   "Enter another path; empty returns."))
     if tty:
@@ -1742,13 +1774,13 @@ def _manual_path_error(raw: str) -> list[str]:
 def _archive_browse_start(raw: str) -> Path:
     """Use typed path context first; only an empty draft uses session memory."""
     if not raw:
-        if _ARCHIVE_BROWSE_DIRECTORY is not None and _ARCHIVE_BROWSE_DIRECTORY.is_dir():
+        if _ARCHIVE_BROWSE_DIRECTORY is not None and _path_usable(_ARCHIVE_BROWSE_DIRECTORY.is_dir):
             return _ARCHIVE_BROWSE_DIRECTORY
         return Path.cwd()
     candidate = Path(raw)
-    if candidate.is_dir():
+    if _path_usable(candidate.is_dir):
         return candidate.absolute()
-    if candidate.parent.is_dir():
+    if _path_usable(candidate.parent.is_dir):
         return candidate.parent.absolute()
     return Path.cwd()
 
@@ -1783,9 +1815,10 @@ def _handle_manual_path() -> Path | None:
         if not raw:
             return None
         candidate = Path(raw)
-        if candidate.is_file():
+        usable, error = _path_probe(candidate.is_file)
+        if usable:
             return candidate
-        context = _manual_path_error(raw)
+        context = _manual_path_error(raw, error)
         initial_text = raw
 
 
@@ -2033,7 +2066,10 @@ def _configure_create(options: _CreateOptions) -> bool:
 
 
 def _menu_confirm_overwrite(archive: Path) -> bool:
-    if not archive.exists():
+    exists, error = _path_probe(archive.exists)
+    if error is not None:
+        raise ArchiveError(f"archive {str(archive)!r}: {_cli_os_reason(error, output=True)}") from error
+    if not exists:
         return True
     _clear_screen()
     try:

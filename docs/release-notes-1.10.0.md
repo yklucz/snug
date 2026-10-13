@@ -2,11 +2,11 @@
 
 ## 1.10A.12
 
-- The usage guide previously described a numbered non-terminal menu. It now states the actual behavior: a no-argument launch with non-terminal stdin or stdout prints help and exits 1. This is a documentation correction, not a behavior change. Commit `e3f9a72`; [startup check](../snug.py#L2827).
+- The usage guide previously described a numbered non-terminal menu. It now states the actual behavior: a no-argument launch with non-terminal stdin or stdout prints help and exits 1. This is a documentation correction, not a behavior change. Commit `e3f9a72`; [startup check](../snug.py#L2863).
 
 ## 1.10B.2
 
-- v1.9.0 accepted truncated TAR headers and could report success while omitting a member. `test`, `list`, `info`, and `extract` now reject incomplete nonzero headers and incomplete PAX or GNU metadata with a truncation error and exit 2. Extraction fails before creating its destination. Commit `2f11601`; [header checks](../snug_core.py#L1416); `tests/test_tar_headers.py::test_cli_rejects_original_partial_pax_header_before_destination`.
+- v1.9.0 accepted truncated TAR headers and could report success while omitting a member. `test`, `list`, `info`, and `extract` now reject incomplete nonzero headers and incomplete PAX or GNU metadata with a truncation error and exit 2. Extraction fails before creating its destination. Commit `2f11601`; [header checks](../snug_core.py#L1419); `tests/test_tar_headers.py::test_cli_rejects_original_partial_pax_header_before_destination`.
 - Complete TAR members without zero end blocks remain accepted. One or two zero blocks and extra zero padding also remain accepted. The same checks apply inside compressed TARs. Commit `2f11601`; `tests/test_tar_headers.py::test_complete_tar_prefix_accepts_missing_terminators_and_zero_padding` and `::test_cli_rejects_original_pax_header_in_complete_compressed_stream`.
 
 ## 1.10B.3
@@ -18,7 +18,7 @@
 
 ## 1.10B.4
 
-- CLI errors previously could expose backend exception text or omit the archive. Common corruption, password, permission, format, and limit errors now name the archive and affected member when available, use plain causes, and give recovery advice where implemented. Ordinary error codes are unchanged. Scripts that match message text may need updates. Commit `0f299ef`; [error formatting](../snug.py#L3352); [wording tests](../tests/test_cli_error_context.py).
+- CLI errors previously could expose backend exception text or omit the archive. Common corruption, password, permission, format, and limit errors now name the archive and affected member when available, use plain causes, and give recovery advice where implemented. Ordinary error codes are unchanged. Scripts that match message text may need updates. Commit `0f299ef`; [error formatting](../snug.py#L3388); [wording tests](../tests/test_cli_error_context.py).
 - An early-closing stdout consumer previously could cause exit 120 and a Python shutdown diagnostic. `list`, `info`, `formats`, and `doctor` now exit 0 silently. A closed consumer can receive only part of a JSON report. JSON keys and types are unchanged. Commit `0f299ef`; `tests/test_cli_closed_pipes.py::test_real_report_pipe_closure_is_silent_success` and `::test_complete_json_report_schema_is_unchanged`.
 - A closed stderr progress pipe previously could fail `create`, `extract`, or `test`. Progress now disables itself and the operation keeps its normal result. Active terminal progress also ends before an error message. Commit `0f299ef`; `tests/test_cli_progress_cleanup.py::test_real_cli_closed_stderr_preserves_success_and_disk_effects` and `::test_cli_failure_terminates_only_an_active_tty_progress_line`.
 - A real error whose message cannot be written to closed stderr still exits 1. Diagnostic argument and operational errors still use plain stderr rather than a JSON error object. Commit `0f299ef`; `tests/test_cli_closed_pipes.py::test_closed_error_pipe_preserves_existing_failure_status`, `::test_diagnostic_operational_errors_keep_plain_stderr_and_empty_stdout`, and `::test_diagnostic_argument_errors_keep_empty_stdout`.
@@ -35,5 +35,10 @@
 - TUI result pauses previously clipped later rows and could hide the result behind skip details. They now put status and counts first, wrap messages, shorten long paths in the middle, and show a hidden-row count. Arrow keys, Page Up, Page Down, Home, and End reach later rows. Enter, Escape, and Ctrl+C dismiss the pause. Commit `fcc5aca`; `tests/test_tui_results.py::test_many_create_skips_keep_status_counts_and_normal_summary_first`, `::test_long_unicode_error_wraps_cause_and_retains_quoted_path_tail`, and `::test_overflow_position_and_every_scroll_key_keep_all_rows_reachable`.
 - Ctrl+C during TUI create, extract, or test previously ended the session with status 130 and no cancellation message. It now shows a cancellation pause and returns to the menu. The message describes any published output that remains. Extraction retains files already published and removes unfinished staging files where possible; it does not roll back the whole archive. CLI interruption still returns 130. Commit `fcc5aca`; `tests/test_tui_operation_cancel.py::test_cancelled_real_engine_handler_returns_to_live_main_menu`, `::test_extract_cancel_retains_only_published_files_and_cleans_staging`, and `::test_cli_keeps_exit_130_on_operation_interrupt`.
 - TUI engine progress previously used the old bar and could show premature completion or exceed a narrow screen. It now uses the CLI completion rules and fits the screen by terminal cell width. Unknown byte totals remain indeterminate until success, and skipped bytes are not counted as processed. Commit `fcc5aca`; `tests/test_tui_progress.py::test_unknown_totals_stay_working_until_explicit_completion`, `::test_skipped_work_finishes_without_fabricating_bytes`, and `::test_unicode_width_resize_and_throttle`.
+
+## 1.10B.8
+
+- A long path typed into the TUI on older Python versions is now rejected with a message and a prefilled editor instead of raising an error. [Input probes](../snug.py#L815), [rejection context](../snug.py#L1752); `tests/test_path_probes.py::test_manual_file_probe_rejects_and_reopens_exact_draft`. The existing `tests/test_tui_lineinput.py::test_manual_rejection_context_has_closed_quotes_and_space_counts_within_cell_budget` is unchanged.
+- Ctrl+C during create setup no longer leaves the staging file created by that run. Existing output files are preserved. [Create staging cleanup](../snug_core.py#L2140); `tests/test_create_staging.py::test_sigint_immediately_after_exclusive_creation_cleans_staging` and `::test_setup_cleanup_preserves_a_replacement_staging_inode`.
 
 See [Usage](usage.md) for the current error, pipe, and progress contracts.

@@ -377,14 +377,14 @@ Checks report the latest stable release; only `snug update` requests installatio
 | Status | Meaning |
 |---|---|
 | `0` | Command completed; check summaries for skipped entries. |
-| `1` | Interactive mode lacks a terminal, or a managed dependency check/repair failed. |
+| `1` | Interactive mode lacks a terminal, a managed dependency check/repair failed, or an error could not be written to closed stderr. |
 | `2` | Invalid CLI arguments, an archive/format/I/O error, or unhealthy required components reported by `doctor`. |
 | `3` | Extraction or integrity testing rejected an unsafe archive. |
 | `4` | An explicit extraction resource limit was exceeded. |
-| `5` | An archive was created but is incomplete because inputs were skipped due to errors. [snug.py:3236](../snug.py#L3236). |
-| `130` | Command interrupted. In the TUI, main-menu, secure-password or archive-operation interruptions can exit with 130; screen cancellation follows the rules above. [snug.py:2579](../snug.py#L2579), [snug.py:2606](../snug.py#L2606), [snug.py:3834](../snug.py#L3834). |
+| `5` | An archive was created but is incomplete because inputs were skipped due to errors. [snug.py:3512](../snug.py#L3512). |
+| `130` | CLI command interrupted. TUI main-menu and secure-password interruptions can exit with 130. Ctrl+C during TUI create, extract, or test shows a cancellation pause and returns to the menu. [snug.py:2231](../snug.py#L2231), [snug.py:2832](../snug.py#L2832), [snug.py:2859](../snug.py#L2859). |
 
-Archive command errors start with `error:` on stderr. They identify the archive and the file or member when available. They state the cause and give a next step where one is clear. Interrupted operations return status 130. Active progress ends before an error or interruption message.
+Archive command errors start with `error:` on stderr. They identify the archive and the file or member when available. They state the cause and give a next step where one is clear. Interrupted CLI operations return status 130. Active progress ends before an error or interruption message.
 
 If the stdout consumer closes its pipe early, `list`, `info`, `formats`, and `doctor` exit 0 silently. A closed consumer may receive only part of the output, including a JSON report. If stderr closes during create, extract, or test progress, Snug disables progress and continues the operation with its normal result and exit status. Progress uses no ANSI controls when stderr is not a terminal.
 

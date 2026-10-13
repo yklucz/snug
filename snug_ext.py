@@ -18,7 +18,7 @@ from typing import Any, Iterable, NoReturn, cast
 from snug_core import (
     ArchiveEntry, ArchiveError, ArchiveFormat, ArchiveInspection, CHUNK_SIZE, CreateReport,
     ProgressSink, SafeOutputFile, UnsafeArchiveError, _ExtractContext,
-    _abort_outputs, _clean_parts, _extract_entry, _prepare_target, _resolve_member, _test_chunks,
+    _abort_outputs, _clean_parts, _defer_staging_sigint, _extract_entry, _prepare_target, _resolve_member, _test_chunks,
     _validate_structure,
     _selected, _detect_by_magic,
 )
@@ -509,7 +509,8 @@ class _SevenZipWriters:
             return self._skip(entry)
         if entry.is_symlink:
             return _LinkWriter(entry, self.ctx)
-        output = SafeOutputFile(self.ctx, entry, target)
+        with _defer_staging_sigint():
+            output = SafeOutputFile(self.ctx, entry, target)
         if output.skipped:
             return self.library.io.NullIO()
         return _DiskWriter(output, entry)

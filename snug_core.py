@@ -13,6 +13,7 @@ import queue
 import re
 import secrets
 import shutil
+import signal
 import stat
 import sys
 import tarfile
@@ -28,6 +29,7 @@ from decimal import Decimal, InvalidOperation, localcontext
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from tarfile import HeaderError
+from types import FrameType
 from typing import Callable, Iterable, Literal, Protocol, Sequence
 
 __version__ = "1.9.0"
@@ -1356,7 +1358,8 @@ def _commit_hardlink(ctx: _ExtractContext, entry: ArchiveEntry, target: Path,
 
 def _extract_regular_file(ctx: _ExtractContext, entry: ArchiveEntry, target: Path,
                           chunks: Iterable[bytes] | None) -> None:
-    output = SafeOutputFile(ctx, entry, target)
+    with _defer_staging_sigint():
+        output = SafeOutputFile(ctx, entry, target)
     if output.skipped:
         return
     if chunks is None:
@@ -2081,6 +2084,77 @@ def _backend_error(fmt: ArchiveFormat, *, writing: bool) -> FormatError:
     return FormatError(_BACKEND_HINTS.get(fmt, f"{fmt.value} support requires the libarchive backend (install snug-archives[extended])"))
 
 
+@contextmanager
+def _defer_staging_sigint():
+    """Keep SIGINT from losing a newly opened descriptor before ownership is recorded."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGINT)
+    if previous == signal.SIG_IGN:
+        yield
+        return
+    pending: list[tuple[int, FrameType | None]] = []
+
+    def defer(number: int, frame: FrameType | None) -> None:
+        if not pending:
+            pending.append((number, frame))
+
+    signal.signal(signal.SIGINT, defer)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        if pending:
+            if callable(previous):
+                previous(*pending[0])
+            else:
+                os.kill(os.getpid(), signal.SIGINT)
+
+
+def _abort_create_staging(created: tuple[int, str] | None,
+                          identity: os.stat_result | None, closed: bool) -> None:
+    """Remove the acquired inode only; an unrelated replacement must survive."""
+    if created is None:
+        return
+    fd, name = created
+    if not closed:
+        try:
+            opened = os.fstat(fd)
+            identity = identity or opened
+            if (opened.st_dev, opened.st_ino) == (identity.st_dev, identity.st_ino):
+                os.close(fd)
+        except OSError:
+            pass
+    if identity is None:
+        return
+    try:
+        current = os.stat(name, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+            Path(name).unlink()
+    except OSError:
+        pass
+
+
+@contextmanager
+def _create_staging_file(archive_path: Path):
+    created: tuple[int, str] | None = None
+    identity: os.stat_result | None = None
+    closed = False
+    try:
+        with _defer_staging_sigint():
+            created = tempfile.mkstemp(prefix=f".{archive_path.name}.", suffix=".part",
+                                       dir=str(archive_path.parent))
+            identity = os.fstat(created[0])
+            path = Path(created[1])
+            os.close(created[0])
+            closed = True
+        yield path
+    except BaseException:
+        _abort_create_staging(created, identity, closed)
+        raise
+
+
 class ArchiveEngine:
     """Select a backend while preserving atomic creation and shared safety."""
 
@@ -2232,54 +2306,42 @@ class ArchiveEngine:
                 archive_path.parent.mkdir(parents=True, exist_ok=True)
                 progress.start(total_bytes, len(items))
                 start = time.monotonic()
-                fd, tmp_name = tempfile.mkstemp(prefix=f".{archive_path.name}.", suffix=".part",
-                                                dir=str(archive_path.parent))
-                os.close(fd)
-                tmp_path = Path(tmp_name)
-            except Exception as exc:
-                report.accidental_skips = len(report.skip_errors)
-                if report.accidental_skips:
-                    raise CreateError(str(exc), report, preserved_existing=existing_output) from exc
-                raise
-            try:
-                backend.create(tmp_path, items, fmt, compresslevel, symlinks,
-                               report, progress, password=password)
-                if report.accidental_skips:
-                    if not report.included_inputs:
-                        raise CreateError(
-                            f"cannot create archive {archive_path}: no inputs could be included; "
-                            "inputs were skipped because of an error; no archive was created", report,
-                            preserved_existing=existing_output,
-                        )
-                    if os.path.lexists(archive_path):
-                        raise CreateError(
-                            f"cannot replace archive {archive_path}: inputs were skipped "
-                            "because of an error; the existing archive was preserved", report,
-                            preserved_existing=True,
-                        )
-                    try:
-                        # Link publication is exclusive: an output appearing
-                        # after the existence check must also be preserved.
-                        os.link(tmp_path, archive_path)
-                    except FileExistsError as exc:
-                        raise CreateError(
-                            f"cannot replace archive {archive_path}: inputs were skipped "
-                            "because of an error; the existing archive was preserved", report,
-                            preserved_existing=True,
-                        ) from exc
-                    try:
-                        tmp_path.unlink()
-                    except OSError as exc:
-                        report.cleanup_warning = (
-                            f"could not remove temporary archive {tmp_path}: {exc.strerror or str(exc)}"
-                        )
-                else:
-                    os.replace(tmp_path, archive_path)
+                with _create_staging_file(archive_path) as tmp_path:
+                    backend.create(tmp_path, items, fmt, compresslevel, symlinks,
+                                   report, progress, password=password)
+                    if report.accidental_skips:
+                        if not report.included_inputs:
+                            raise CreateError(
+                                f"cannot create archive {archive_path}: no inputs could be included; "
+                                "inputs were skipped because of an error; no archive was created", report,
+                                preserved_existing=existing_output,
+                            )
+                        if os.path.lexists(archive_path):
+                            raise CreateError(
+                                f"cannot replace archive {archive_path}: inputs were skipped "
+                                "because of an error; the existing archive was preserved", report,
+                                preserved_existing=True,
+                            )
+                        try:
+                            # Link publication is exclusive: an output appearing
+                            # after the existence check must also be preserved.
+                            os.link(tmp_path, archive_path)
+                        except FileExistsError as exc:
+                            raise CreateError(
+                                f"cannot replace archive {archive_path}: inputs were skipped "
+                                "because of an error; the existing archive was preserved", report,
+                                preserved_existing=True,
+                            ) from exc
+                        try:
+                            tmp_path.unlink()
+                        except OSError as exc:
+                            report.cleanup_warning = (
+                                f"could not remove temporary archive {tmp_path}: {exc.strerror or str(exc)}"
+                            )
+                    else:
+                        os.replace(tmp_path, archive_path)
             except BaseException as exc:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                report.accidental_skips = len(report.skip_errors)
                 if report.accidental_skips and isinstance(exc, Exception) and not isinstance(exc, CreateError):
                     raise CreateError(
                         str(exc), report, preserved_existing=existing_output,
