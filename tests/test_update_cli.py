@@ -14,7 +14,7 @@ def isolated_updates(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.mark.parametrize("latest,available", [("1.8.0", False), ("1.10.0", True)])
+@pytest.mark.parametrize("latest,available", [("1.8.0", False), ("1.10.1", True)])
 def test_explicit_update_check_output(isolated_updates, monkeypatch, capsys, latest, available):
     monkeypatch.setattr(update, "check_update", lambda version: update.UpdateResult(version, latest, available))
     monkeypatch.setattr(snug, "ArchiveEngine", lambda: pytest.fail("update must not open an archive engine"))
@@ -74,7 +74,7 @@ def test_automatic_notice_never_pollutes_listing_or_quiet_output(
     source.write_bytes(b"notice filter")
     archive = tmp_path / "hello.zip"
     snug.ArchiveEngine().create(archive, [source])
-    handle = update.AutomaticCheck(update.UpdateResult(snug.__version__, "1.10.0", True))
+    handle = update.AutomaticCheck(update.UpdateResult(snug.__version__, "1.10.1", True))
     handle.done.set()
     monkeypatch.setattr(snug, "_start_update_check", lambda: handle)
     monkeypatch.setattr(update, "automatic_notice", lambda value: "NOTICE: run snug update")

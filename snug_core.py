@@ -32,7 +32,7 @@ from tarfile import HeaderError
 from types import FrameType
 from typing import Callable, Iterable, Literal, Protocol, Sequence
 
-__version__ = "1.9.0"
+__version__ = "1.10.0"
 
 CHUNK_SIZE = 1 << 20      # 1 MiB
 _TTY_REFRESH = 0.1        # seconds between progress redraws
