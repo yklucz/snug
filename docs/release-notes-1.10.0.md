@@ -57,11 +57,11 @@ See [Usage](usage.md#exit-status) for the complete contract. No-argument, non-TT
 
 ## Fixes
 
-- v1.9.0 accepted truncated TAR headers and could report success while omitting a member. `test`, `list`, `info`, and `extract` now reject incomplete nonzero headers and incomplete PAX or GNU metadata with exit 2. Extraction fails before destination creation. Complete members without zero end blocks, and archives with zero padding, remain accepted. Compressed TARs use the same checks. Commit `2f11601`; [header checks](../snug_core.py#L1471); `tests/test_tar_headers.py`.
-- v1.9.0 could report `Archive is OK.` for a dangling TAR hardlink. `test` and `extract` now reject a missing or later target with exit 2 before destination creation. `list` and `info` remain available for diagnosis. [Hardlink checks](../snug_core.py#L1083); `tests/test_tar_hardlinks.py`.
-- A selected TAR hardlink whose target is excluded or removed by `--strip-components` is skipped with a stderr warning naming both paths. The warning is visible under `-q`; exit remains 0. [Selection warnings](../snug_core.py#L1095), [warning output](../snug.py#L3558); `tests/test_tar_hardlinks.py`.
-- An unreadable ZIP reports a permission error and advice even without libarchive. v1.9.0 could report an unsupported format. [ZIP probing](../snug_core.py#L1523); `tests/test_zip_permissions.py`.
-- Ctrl+C during create setup no longer leaves the staging file created by that run. Existing archives remain intact. Commit `4cbff3e`; [staging cleanup](../snug_core.py#L2191); `tests/test_create_staging.py::test_sigint_immediately_after_exclusive_creation_cleans_staging` and `::test_setup_cleanup_preserves_a_replacement_staging_inode`.
+- v1.9.0 accepted truncated TAR headers and could report success while omitting a member. `test`, `list`, `info`, and `extract` now reject incomplete nonzero headers and incomplete PAX or GNU metadata with exit 2. Extraction fails before destination creation. Complete members without zero end blocks, and archives with zero padding, remain accepted. Compressed TARs use the same checks. Commit `2f11601`; [header checks](../snug_core.py#L1666); `tests/test_tar_headers.py`.
+- v1.9.0 could report `Archive is OK.` for a dangling TAR hardlink. `test` and `extract` now reject a missing or later target with exit 2 before destination creation. `list` and `info` remain available for diagnosis. [Hardlink checks](../snug_core.py#L1112); `tests/test_tar_hardlinks.py`.
+- A selected TAR hardlink whose target is excluded or removed by `--strip-components` is skipped with a stderr warning naming both paths. The warning is visible under `-q`; exit remains 0. [Selection warnings](../snug_core.py#L1124), [warning output](../snug.py#L3558); `tests/test_tar_hardlinks.py`.
+- An unreadable ZIP reports a permission error and advice even without libarchive. v1.9.0 could report an unsupported format. [ZIP probing](../snug_core.py#L1813); `tests/test_zip_permissions.py`.
+- Ctrl+C during create setup no longer leaves the staging file created by that run. Existing archives remain intact. Commit `4cbff3e`; [staging cleanup](../snug_core.py#L2496); `tests/test_create_staging.py::test_sigint_immediately_after_exclusive_creation_cleans_staging` and `::test_setup_cleanup_preserves_a_replacement_staging_inode`.
 
 ## Known limitations
 

@@ -5,6 +5,7 @@ The libraries decode archive contents; Snug owns every filesystem write.
 
 from __future__ import annotations
 
+import errno
 import importlib
 import io
 import os
@@ -63,6 +64,16 @@ def _error_text(exc: Exception, password: str | None = None) -> str:
 
 
 _SEVEN_ZIP_PASSWORD_MESSAGE = "7z archive requires a password; use --password or --password-file"
+
+
+def _create_source_stat(source: Path, symlinks: str,
+                        report: CreateReport) -> os.stat_result | None:
+    """Keep source metadata errors distinct from unsupported input types."""
+    try:
+        return source.stat() if symlinks == "follow" else source.lstat()
+    except OSError as exc:
+        report.record_skip(source, exc.strerror or str(exc))
+        return None
 
 
 class LibarchiveBackend:
@@ -334,7 +345,7 @@ class LibarchiveBackend:
         if password is not None:
             raise ArchiveError(f"password protection is not supported for {fmt.value} creation")
         if fmt == ArchiveFormat("ar"):
-            self._validate_ar_sources(items, symlinks)
+            items = self._validate_ar_sources(items, symlinks, report)
         try:
             with library.file_writer(str(path), self._write_names[fmt]) as writer:
                 for source, name in items:
@@ -346,19 +357,25 @@ class LibarchiveBackend:
             raise ArchiveError(f"libarchive could not create {fmt.value}: {_error_text(exc)}") from exc
 
     @staticmethod
-    def _validate_ar_sources(items: list[tuple[Path, str]], symlinks: str) -> None:
+    def _validate_ar_sources(items: list[tuple[Path, str]], symlinks: str,
+                             report: CreateReport) -> list[tuple[Path, str]]:
         # Unix ar has a flat regular-file namespace. Never silently flatten.
+        regular = []
         for source, name in items:
-            if ("/" in name.replace("\\", "/") or not source.is_file()
-                    or (source.is_symlink() and symlinks != "follow")):
+            if "/" in name.replace("\\", "/"):
                 raise ArchiveError("AR creation requires regular files with flat archive names; directories and symbolic links are unsupported")
+            st = _create_source_stat(source, symlinks, report)
+            if st is None:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                raise ArchiveError("AR creation requires regular files with flat archive names; directories and symbolic links are unsupported")
+            regular.append((source, name))
+        return regular
 
     def _write_item(self, writer, source: Path, name: str, symlinks: str,
                     report: CreateReport, progress: ProgressSink) -> None:
-        try:
-            st = source.stat() if symlinks == "follow" else source.lstat()
-        except OSError as exc:
-            report.record_skip(source, exc.strerror or str(exc))
+        st = _create_source_stat(source, symlinks, report)
+        if st is None:
             return
         # libarchive-c's float setter swaps seconds/fractions, overflowing a
         # Windows 32-bit C long. Its tuple setter preserves the actual time.
@@ -775,16 +792,14 @@ class SevenZipBackend:
     @staticmethod
     def _write_item(archive, source: Path, name: str, symlinks: str,
                     report: CreateReport) -> None:
-        try:
-            st = source.stat() if symlinks == "follow" else source.lstat()
-        except OSError as exc:
-            report.record_skip(source, exc.strerror or str(exc))
+        st = _create_source_stat(source, symlinks, report)
+        if st is None:
             return
         if stat.S_ISLNK(st.st_mode) and symlinks == "skip":
             report.skipped.append(name)
             return
-        if stat.S_ISLNK(st.st_mode) and not source.exists():
-            raise ArchiveError(f"7z creation cannot store a dangling symbolic link: {name!r}; use ZIP or TAR")
+        if stat.S_ISLNK(st.st_mode) and not SevenZipBackend._stored_symlink_target(source, name, report):
+            return
         if not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode)):
             report.skipped.append(name)
             return
@@ -797,6 +812,18 @@ class SevenZipBackend:
         else:
             report.files += 1
             report.bytes_in += st.st_size
+
+    @staticmethod
+    def _stored_symlink_target(source: Path, name: str,
+                               report: CreateReport) -> bool:
+        try:
+            source.stat()
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                raise ArchiveError(f"7z creation cannot store a dangling symbolic link: {name!r}; use ZIP or TAR") from exc
+            report.record_skip(source, exc.strerror or str(exc))
+            return False
+        return True
 
     def extract(self, path: Path, ctx: _ExtractContext, password: str | None = None) -> None:
         library = self._library()

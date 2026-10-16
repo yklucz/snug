@@ -27,7 +27,9 @@ python -m compileall -q snug.py snug_core.py snug_ext.py snug_runtime.py snug_up
 
 The [CI workflow](../.github/workflows/tests.yml) configures seven test jobs. Five run on Linux x86_64 with Python 3.10–3.14. The new Linux arm64 job and the macOS arm64 job use Python 3.14. Each job installs `.[all,test]` plus native libarchive and runs compilation and pytest. Only Linux x86_64 with Python 3.14 also runs the pinned Pyright version and validates built artifacts.
 
-The Linux arm64 job remains unverified until it runs on GitHub. Windows CI runs separately on `windows`. Review actual job results before claiming a platform or Python version has passed. A local macOS run does not validate Linux or Windows.
+Run tests on the latest patch release of each supported Python minor: 3.10, 3.11, 3.12, 3.13, and 3.14. Standard library behavior, including `tarfile`, changes between patch releases.
+
+Windows CI runs separately on `windows`. Review actual job results before claiming a platform or Python version has passed. A local macOS run does not validate Linux or Windows.
 
 ## Project layout
 

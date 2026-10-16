@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import bz2
+import codecs
 import gzip
 import io
 import lzma
@@ -28,7 +29,6 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, localcontext
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from tarfile import HeaderError
 from types import FrameType
 from typing import Callable, Iterable, Literal, Protocol, Sequence
 
@@ -870,26 +870,41 @@ def _join_arc(arcname: str, name: str) -> str:
     return f"{arcname}/{name}" if arcname else name
 
 
-def _walk(path: Path, arcname: str, *, symlinks: str, seen: set[str]):
+def _create_source_mode(path: Path, symlinks: str,
+                        skip_errors: list[CreateSkip] | None) -> int | None:
+    """Probe source metadata without relying on version-dependent predicates."""
+    try:
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode) and symlinks == "follow":
+            mode = path.stat().st_mode
+        return mode
+    except OSError as exc:
+        if skip_errors is None:
+            raise
+        skip_errors.append(CreateSkip(path, exc.strerror or str(exc)))
+        return None
+
+
+def _walk(path: Path, arcname: str, *, symlinks: str, seen: set[str],
+          skip_errors: list[CreateSkip] | None = None):
     """Yield (filesystem_path, archive_name) pairs for *path* and children."""
-    if _is_symlink_short_circuit(path, symlinks):
+    mode = _create_source_mode(path, symlinks, skip_errors)
+    if mode is None:
+        return
+    if stat.S_ISLNK(mode):
         if symlinks == "store":
             yield path, arcname
         return
 
-    if path.is_dir():
-        yield from _walk_dir(path, arcname, symlinks=symlinks, seen=seen)
+    if stat.S_ISDIR(mode):
+        yield from _walk_dir(path, arcname, symlinks=symlinks, seen=seen,
+                             skip_errors=skip_errors)
     else:
         yield path, arcname
 
 
-def _is_symlink_short_circuit(path: Path, symlinks: str) -> bool:
-    """True when the current entry should be yielded or skipped directly
-    rather than descended into."""
-    return path.is_symlink() and symlinks in ("skip", "store")
-
-
-def _walk_dir(path: Path, arcname: str, *, symlinks: str, seen: set[str]):
+def _walk_dir(path: Path, arcname: str, *, symlinks: str, seen: set[str],
+              skip_errors: list[CreateSkip] | None = None):
     """Recursive directory traversal; cycle-safe via *seen*."""
     real = os.path.realpath(path)
     if real in seen:
@@ -904,7 +919,7 @@ def _walk_dir(path: Path, arcname: str, *, symlinks: str, seen: set[str]):
     for child in children:
         yield from _walk(
             child, _join_arc(arcname, child.name),
-            symlinks=symlinks, seen=seen,
+            symlinks=symlinks, seen=seen, skip_errors=skip_errors,
         )
     seen.discard(real)
 
@@ -913,9 +928,17 @@ def _walk_dir(path: Path, arcname: str, *, symlinks: str, seen: set[str]):
 #  Item collection for archive creation
 # --------------------------------------------------------------------------- #
 
-def _require_source(src: Path) -> None:
-    if not src.exists() and not src.is_symlink():
-        raise ArchiveError(f"no such file or directory: {src}")
+def _require_source(src: Path, skip_errors: list[CreateSkip] | None = None) -> bool:
+    try:
+        src.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        raise ArchiveError(f"no such file or directory: {src}") from None
+    except OSError as exc:
+        if skip_errors is None:
+            raise
+        skip_errors.append(CreateSkip(src, exc.strerror or str(exc)))
+        return False
+    return True
 
 
 def _arcname_for(src: Path, root_abs: Path | None) -> str:
@@ -931,14 +954,25 @@ def _arcname_for(src: Path, root_abs: Path | None) -> str:
     return "" if rel == "." else rel
 
 
-def _file_size(fs_path: Path) -> int:
+def _file_size(fs_path: Path, *, follow: bool = False) -> int:
     """Best-effort size of a regular file; 0 for dirs, symlinks and errors."""
-    if fs_path.is_symlink() or not fs_path.is_file():
-        return 0
     try:
-        return fs_path.stat().st_size
+        if not follow and stat.S_ISLNK(fs_path.lstat().st_mode):
+            return 0
+        info = fs_path.stat()
+        return info.st_size if stat.S_ISREG(info.st_mode) else 0
     except OSError:
         return 0
+
+
+def _iter_sources(sources, root_abs: Path | None, cancel,
+                  skip_errors: list[CreateSkip] | None):
+    for source in sources:
+        if cancel is not None and cancel.is_set():
+            return
+        src = Path(source)
+        if _require_source(src, skip_errors):
+            yield src, _arcname_for(src, root_abs)
 
 
 def _iter_items(sources, *, root, symlinks: str, archive_real: str, cancel=None,
@@ -947,14 +981,9 @@ def _iter_items(sources, *, root, symlinks: str, archive_real: str, cancel=None,
     root_abs = Path(os.path.abspath(root)) if root is not None else None
     seen_names: dict[str, Path] = {}
 
-    for source in sources:
-        if cancel is not None and cancel.is_set():
-            return
-        src = Path(source)
-        _require_source(src)
-        arcname = _arcname_for(src, root_abs)
-
-        for fs_path, name in _walk(src, arcname, symlinks=symlinks, seen=set()):
+    for src, arcname in _iter_sources(sources, root_abs, cancel, skip_errors):
+        for fs_path, name in _walk(src, arcname, symlinks=symlinks, seen=set(),
+                                   skip_errors=skip_errors):
             if cancel is not None and cancel.is_set():
                 return
             if not name or os.path.realpath(fs_path) == archive_real:
@@ -1459,51 +1488,312 @@ def _password_bytes(password) -> bytes | None:
     return str(password).encode("utf-8")
 
 
-@dataclass
-class _TarHeaderState:
-    offset: int
-    metadata_end: int | None = None
+class _PaxSizeNumber:
+    """Parse a decimal PAX size without retaining its record value."""
+
+    def __init__(self) -> None:
+        self.decoder = codecs.getincrementaldecoder("utf-8")("surrogateescape")
+        self.value = 0
+        self.sign = 1
+        self.phase = "leading"
+        self.digits = 0
+        self.limit = getattr(sys, "get_int_max_str_digits", lambda: 0)()
+
+    def feed(self, data: bytes | memoryview, *, final: bool = False) -> None:
+        if self.phase == "invalid":
+            return
+        for cursor in range(0, len(data), 512):
+            for char in self.decoder.decode(data[cursor:cursor + 512]):
+                self._character(char)
+        if final:
+            for char in self.decoder.decode(b"", final=True):
+                self._character(char)
+
+    def _character(self, char: str) -> None:
+        if self.phase == "invalid":
+            return
+        if char.isdecimal() and self.phase != "trailing":
+            self._digit(char)
+        elif char.isspace() and char not in "\x1c\x1d\x1e\x1f":
+            self._space()
+        elif char in "+-" and self.phase == "leading":
+            self.sign = -1 if char == "-" else 1
+            self.phase = "signed"
+        elif char == "_" and self.phase == "digits":
+            self.phase = "underscore"
+        else:
+            self.phase = "invalid"
+
+    def _digit(self, char: str) -> None:
+        self.digits += 1
+        if self.limit and self.digits > self.limit:
+            self.phase = "invalid"
+            return
+        self.value = self.value * 10 + unicodedata.decimal(char)
+        self.phase = "digits"
+
+    def _space(self) -> None:
+        if self.phase == "digits":
+            self.phase = "trailing"
+        elif self.phase not in ("leading", "trailing"):
+            self.phase = "invalid"
+
+    def finish(self) -> int:
+        self.feed(b"", final=True)
+        return self.sign * self.value if self.phase in ("digits", "trailing") else 0
 
 
-def _inspection_tarinfo(path: Path) -> type[tarfile.TarInfo]:
-    """Check headers during tarfile's existing traversal, including metadata."""
-    headers: list[_TarHeaderState] = []
-    message = f"TAR archive {str(path)!r} is truncated"
-    metadata_types = (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE,
-                      tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK)
+class _PaxSizeRecords:
+    """Keep only the size field while streaming length-framed PAX records."""
 
-    class CheckedTarInfo(tarfile.TarInfo):
-        @classmethod
-        def fromtarfile(cls, tarfile: tarfile.TarFile) -> tarfile.TarInfo:
-            archive = tarfile
-            state = _TarHeaderState(archive.fileobj.tell())
-            headers.append(state)
-            try:
-                return super().fromtarfile(archive)
-            except HeaderError:
-                # A short metadata read can otherwise become InvalidHeaderError,
-                # which tarfile treats as EOF after the first member.
-                if state.metadata_end is not None and archive.fileobj.tell() < state.metadata_end:
-                    raise ArchiveError(message) from None
-                raise
-            finally:
-                headers.pop()
+    def __init__(self, payload_size: int) -> None:
+        self.payload_size = payload_size
+        self.size: int | None = None
+        self.length = 0
+        self.prefix_bytes = 0
+        self.remaining = 0
+        self.key = bytearray()
+        self.number: _PaxSizeNumber | None = None
+        self.state = "prefix"
 
-        @classmethod
-        def frombuf(cls, buf: bytes | bytearray, encoding: str, errors: str) -> tarfile.TarInfo:
-            if 0 < len(buf) < tarfile.BLOCKSIZE and any(buf):
-                raise ArchiveError(message)
-            if len(headers) > 1 and headers[-2].metadata_end is not None and not any(buf):
-                # Extended metadata requires a following member header, even
-                # when its payload is complete and the next block is all zero.
-                raise ArchiveError(message)
-            info = super().frombuf(buf, encoding, errors)
-            if headers and info.type in metadata_types:
-                padded = (info.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE * tarfile.BLOCKSIZE
-                headers[-1].metadata_end = headers[-1].offset + tarfile.BLOCKSIZE + padded
-            return info
+    def feed(self, data: bytes | memoryview) -> None:
+        data = memoryview(data)
+        cursor = 0
+        while cursor < len(data) and self.state != "invalid":
+            if self.state == "prefix":
+                self._prefix(data[cursor])
+                cursor += 1
+            elif self.state == "key":
+                self._key(data[cursor])
+                cursor += 1
+            else:
+                cursor += self._value(data[cursor:])
 
-    return CheckedTarInfo
+    def _prefix(self, char: int) -> None:
+        self.prefix_bytes += 1
+        if ord("0") <= char <= ord("9"):
+            self.length = self.length * 10 + char - ord("0")
+            if self.length > self.payload_size:
+                self.state = "invalid"
+        elif char == ord(" ") and self.length >= self.prefix_bytes + 3:
+            self.remaining = self.length - self.prefix_bytes
+            self.state = "key"
+        else:
+            self.state = "invalid"
+
+    def _key(self, char: int) -> None:
+        self.remaining -= 1
+        if char == ord("="):
+            if self.key == b"size":
+                self.number = _PaxSizeNumber()
+            self.state = "value"
+        else:
+            self.key.append(char)
+            if not b"size".startswith(self.key):
+                self.state = "value"
+        if self.remaining <= 0:
+            self.state = "invalid"
+
+    def _value(self, data: memoryview) -> int:
+        count = min(len(data), self.remaining)
+        final = count == self.remaining
+        if self.number is not None:
+            self.number.feed(data[:count - int(final)])
+            if final and data[count - 1] == ord("\n"):
+                self.size = self.number.finish()
+        self.remaining -= count
+        if final:
+            self.length = self.prefix_bytes = 0
+            self.key.clear()
+            self.number = None
+            self.state = "prefix"
+        return count
+
+
+class _TarHeaderWalker:
+    """Validate physical TAR blocks independently of TarInfo dispatch."""
+
+    def __init__(self, path: Path) -> None:
+        self.message = f"TAR archive {str(path)!r} is truncated"
+        self.header = bytearray()
+        self.body_left = 0
+        self.metadata_left = 0
+        self.metadata_type = b""
+        self.pax: _PaxSizeRecords | None = None
+        self.global_size: int | None = None
+        self.local_size: int | None = None
+        self.needs_member = False
+        self.sparse_extra = False
+        self.sparse_size = 0
+        self.ended = False
+
+    def feed(self, data: bytes | memoryview) -> None:
+        data = memoryview(data)
+        cursor = 0
+        while cursor < len(data) and not self.ended:
+            if self.body_left:
+                cursor += self._body(data[cursor:])
+            else:
+                count = min(512 - len(self.header), len(data) - cursor)
+                self.header.extend(data[cursor:cursor + count])
+                cursor += count
+                if len(self.header) == 512:
+                    block = bytes(self.header)
+                    self.header.clear()
+                    self._block(block)
+
+    def _body(self, data: memoryview) -> int:
+        count = min(self.body_left, len(data))
+        if self.pax is not None:
+            self.pax.feed(data[:min(count, self.metadata_left)])
+        self.metadata_left = max(0, self.metadata_left - count)
+        self.body_left -= count
+        if self.body_left == 0:
+            self._metadata_finished()
+        return count
+
+    def _metadata_finished(self) -> None:
+        if self.pax is not None:
+            size = self.pax.size
+            if self.metadata_type == tarfile.XGLTYPE:
+                if size is not None:
+                    self.global_size = size
+            elif self.local_size is None:
+                self.local_size = self.global_size if size is None else size
+        self.pax = None
+        self.metadata_type = b""
+
+    def _block(self, block: bytes) -> None:
+        if self.sparse_extra:
+            self.sparse_extra = bool(block[504])
+            if not self.sparse_extra:
+                self.body_left = self._padded(self.sparse_size)
+            return
+        if not any(block):
+            if self.needs_member:
+                raise ArchiveError(self.message)
+            self.ended = True
+            return
+        info = tarfile.TarInfo.frombuf(block, "utf-8", "surrogateescape")
+        kind = block[156:157]
+        if kind in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE,
+                    tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK):
+            self._metadata(kind, info.size)
+        else:
+            self._member(block, info, kind)
+
+    def _metadata(self, kind: bytes, size: int) -> None:
+        self.needs_member = True
+        self.metadata_type = kind
+        self.metadata_left = size
+        self.body_left = self._padded(size)
+        if kind in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE):
+            self.pax = _PaxSizeRecords(size)
+        if self.body_left == 0:
+            self._metadata_finished()
+
+    def _member(self, block: bytes, info: tarfile.TarInfo, kind: bytes) -> None:
+        # Global PAX fields change the logical member, but tarfile advances
+        # by its raw stored size. A local x/X record recalculates that offset.
+        size = self.local_size
+        self.local_size = None
+        self.needs_member = False
+        if kind == tarfile.GNUTYPE_SPARSE:
+            self.sparse_size = info.size
+            self.sparse_extra = bool(block[482])
+            if not self.sparse_extra:
+                self.body_left = self._padded(info.size)
+        elif kind in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.CONTTYPE) or kind not in tarfile.SUPPORTED_TYPES:
+            self.body_left = self._padded(info.size if size is None else size)
+
+    @staticmethod
+    def _padded(size: int) -> int:
+        if size < 0:
+            raise tarfile.HeaderError("invalid offset")
+        return (size + 511) // 512 * 512
+
+    def finish(self) -> None:
+        if self.body_left or self.needs_member or self.sparse_extra or any(self.header):
+            raise ArchiveError(self.message)
+
+
+class _TarInspectionReader(io.BufferedIOBase):
+    """Feed the validator from the same decoded stream tarfile enumerates."""
+
+    def __init__(self, source, path: Path) -> None:
+        self.source = source
+        self.walker = _TarHeaderWalker(path)
+        self.position = 0
+        self.checked = 0
+
+    def read(self, size: int | None = -1) -> bytes:
+        if size is None or size < 0:
+            raise io.UnsupportedOperation("unbounded TAR inspection read")
+        if size <= CHUNK_SIZE:
+            return self._read_part(size)
+        chunks = []
+        remaining = size
+        while remaining:
+            data = self._read_part(min(CHUNK_SIZE, remaining))
+            chunks.append(data)
+            remaining -= len(data)
+            if not data:
+                break
+        return b"".join(chunks)
+
+    def _read_part(self, size: int) -> bytes:
+        data = self.source.read(size)
+        end = self.position + len(data)
+        if end > self.checked:
+            self.walker.feed(memoryview(data)[max(0, self.checked - self.position):])
+            self.checked = end
+        self.position = end
+        if size and len(data) < size:
+            self.walker.finish()
+        return data
+
+    def tell(self) -> int:
+        return self.position
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        target = self.position + offset if whence == io.SEEK_CUR else offset
+        if whence not in (io.SEEK_SET, io.SEEK_CUR) or target < 0:
+            raise io.UnsupportedOperation("unsupported TAR inspection seek")
+        if target < self.position:
+            self.source.seek(target)
+            self.position = target
+        while self.position < target:
+            if not self.read(min(CHUNK_SIZE, target - self.position)):
+                break
+        return self.position
+
+
+def _tar_decoder(raw, magic: bytes, fmt: ArchiveFormat | None):
+    if magic.startswith(b"\x1f\x8b"):
+        return gzip.GzipFile(fileobj=raw, mode="rb")
+    if magic.startswith(b"BZh"):
+        return bz2.BZ2File(raw, "rb")
+    if magic.startswith(b"\xfd7zXZ\x00") or fmt is ArchiveFormat.LZMA:
+        return lzma.LZMAFile(raw, "rb")
+    if magic.startswith(b"\x28\xb5\x2f\xfd"):
+        try:
+            zstd = __import__("compression.zstd", fromlist=["open"])
+        except ImportError:
+            raise tarfile.ReadError("zstd compression is not available") from None
+        return zstd.open(raw, "rb")
+    return raw
+
+
+@contextmanager
+def _inspection_tar_stream(path: Path, fmt: ArchiveFormat | None):
+    with ExitStack() as stack:
+        raw = stack.enter_context(open(path, "rb"))
+        magic = raw.read(6)
+        raw.seek(0)
+        source = _tar_decoder(raw, magic, fmt)
+        if source is not raw:
+            stack.enter_context(source)
+        yield _TarInspectionReader(source, path)
 
 
 class NativeBackend:
@@ -1547,8 +1837,11 @@ class NativeBackend:
                                          {"encrypted": any(i.flag_bits & 1 for i in infos)})
         if password is not None:
             raise ArchiveError(_TAR_PASSWORD_MESSAGE)
-        with tarfile.open(path, "r:*", tarinfo=_inspection_tarinfo(path)) as tf:
-            return ArchiveInspection([_tar_entry(m) for m in tf.getmembers()], {"encrypted": False})
+        with _inspection_tar_stream(path, fmt) as source:
+            with tarfile.open(fileobj=source, mode="r:") as tf:
+                entries = [_tar_entry(member) for member in tf.getmembers()]
+                source.walker.finish()
+                return ArchiveInspection(entries, {"encrypted": False})
 
     def list_entries(self, path: Path, password=None) -> list[ArchiveEntry]:
         return self.inspect(path, password).entries
@@ -2002,13 +2295,19 @@ class StreamBackend:
         return (_detect_by_magic(path) or _extension_format(path)) in self.read_formats
 
     @staticmethod
-    def validate_sources(sources, symlinks: str) -> None:
+    def validate_sources(sources, symlinks: str,
+                         skip_errors: list[CreateSkip] | None = None) -> bool:
         if len(sources) != 1:
             raise ArchiveError("standalone compression requires exactly one regular file; use a TAR variant for multiple files or directories")
         source = Path(sources[0])
-        _require_source(source)
-        if not source.is_file() or (source.is_symlink() and symlinks != "follow"):
+        if not _require_source(source, skip_errors):
+            return False
+        mode = _create_source_mode(source, symlinks, skip_errors)
+        if mode is None:
+            return False
+        if not stat.S_ISREG(mode):
             raise ArchiveError("standalone compression requires one regular file; directories and stored symlinks are unsupported")
+        return True
 
     @staticmethod
     def _open(path, fmt: ArchiveFormat, mode: str, level=None):
@@ -2070,9 +2369,15 @@ class StreamBackend:
                report, progress, password=None) -> None:
         if password is not None:
             raise ArchiveError(_STREAM_PASSWORD_MESSAGE)
-        if len(items) != 1 or not items[0][0].is_file() or (items[0][0].is_symlink() and symlinks != "follow"):
+        if len(items) != 1:
             raise ArchiveError("standalone compression requires exactly one regular file")
         source, name = items[0]
+        mode = _create_source_mode(source, symlinks, report.skip_errors)
+        if mode is None:
+            report.accidental_skips = len(report.skip_errors)
+            return
+        if not stat.S_ISREG(mode):
+            raise ArchiveError("standalone compression requires exactly one regular file")
         progress.item(name)
         with source.open("rb") as src, self._open(archive_path, fmt, "wb", compresslevel) as dst:
             while True:
@@ -2206,6 +2511,20 @@ def _create_staging_file(archive_path: Path):
         raise
 
 
+def _validate_create_sources(backend: ArchiveBackend, sources, symlinks: str,
+                             report: CreateReport, existing_output: bool) -> None:
+    if not isinstance(backend, StreamBackend):
+        return
+    if backend.validate_sources(sources, symlinks, report.skip_errors):
+        return
+    report.accidental_skips = len(report.skip_errors)
+    raise CreateError(
+        f"cannot create archive {report.archive}: no inputs could be included; "
+        "inputs were skipped because of an error; no archive was created",
+        report, preserved_existing=existing_output,
+    )
+
+
 class ArchiveEngine:
     """Select a backend while preserving atomic creation and shared safety."""
 
@@ -2318,8 +2637,7 @@ class ArchiveEngine:
                        skip_errors: list[CreateSkip] | None = None):
         items = list(_iter_items(sources, root=root, symlinks=symlinks,
                                  archive_real=archive_real, skip_errors=skip_errors))
-        total_bytes = sum((p.stat().st_size if symlinks == "follow" and p.is_file()
-                           else _file_size(p)) for p, _ in items)
+        total_bytes = sum(_file_size(p, follow=symlinks == "follow") for p, _ in items)
         return items, total_bytes
 
     def create(self, archive, sources: Iterable[str | os.PathLike[str]], *,
@@ -2340,13 +2658,12 @@ class ArchiveEngine:
         fmt = self._resolve_format(fmt, archive_path, for_write=True)
         backend = self._write_backend(fmt)
         sources = list(sources)
-        if isinstance(backend, StreamBackend):
-            backend.validate_sources(sources, symlinks)
         archive_real = os.path.realpath(archive_path)
         with self._operation():
             report = CreateReport(archive=archive_path, format=fmt)
             existing_output = os.path.lexists(archive_path)
             try:
+                _validate_create_sources(backend, sources, symlinks, report, existing_output)
                 if precollected is not None:
                     items, total_bytes = precollected[:2]
                     if len(precollected) == 3:
