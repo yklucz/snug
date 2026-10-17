@@ -66,9 +66,11 @@ Preserve per-file transactions, fsync, staging, publication order and fresh path
 
 This review starts from `34f24e91e6a3d3a7511912b7d4c6a55e2b2f885c`. Findings below record D.6 and its D.7 follow-up. The release remains paused. The retained D.5 artifacts belong to the original commit and were left unchanged. A new release commit requires fresh sign-off and rebuilt artifacts.
 
-### Cognitive complexity follow-up in D.7
+### Resolved SonarLint S3776 findings
 
-D.6 deferred these four findings. D.7 resolves them with focused helper extractions and an early return. The installed SonarPython 5.32.0.37250 parser and cognitive-complexity visitor reproduce the four reported baseline scores exactly. The same analyzer now reports the scores below, all within the threshold of 15. This was a direct offline analyzer invocation, rather than an IDE or server scan.
+D.6 deferred these four cognitive complexity findings. The user requested the refactor separately after the D.6 review. Commit `ca37c85` resolved all four with focused helper extractions and an early return. Its commit message does not mention the complexity refactor.
+
+The installed SonarPython 5.32.0.37250 analyzer reproduced all four baseline scores. It measured the refactored scores below. All meet the threshold of 15. These measurements used a direct offline invocation of its parser and cognitive-complexity visitor.
 
 | Function and current location | Before | After | Behavior retained |
 |---|---:|---:|---|
@@ -77,7 +79,7 @@ D.6 deferred these four findings. D.7 resolves them with focused helper extracti
 | [`ArchiveEngine.create`](../snug_core.py#L2694) | 23 | 12 | Publication moved to `_publish_created_archive`; staging, exclusive partial publication, preservation and exception boundaries remain unchanged. |
 | [`_cli_error_text`](../snug.py#L3426) | 17 | 13 | An early return for create-policy errors removes nesting without changing error precedence, context or exit status. |
 
-The new helpers score 6, 7 and 11 respectively. Every existing function outside those four has the same AST as the preserved D.6 source. Existing creation, staging, inode-cache and CLI error regressions cover the refactors. No new tests or behavior changes were introduced for this follow-up.
+The new helper `_skip_duplicate_item` scores 6. `NativeBackend._tar_add_regular_file` scores 7. `ArchiveEngine._publish_created_archive` scores 11. Every existing function outside those four has the same AST as the preserved D.6 source. Existing creation, staging, inode-cache and CLI error regressions cover the refactors. No new tests or behavior changes were introduced for this follow-up.
 
 ### CodeQL alerts
 
@@ -187,4 +189,4 @@ The same-class regex audit found no second overlapping-repeat/failing-suffix con
 | [`_VERSION`](../snug_update.py#L52), [release digest](../snug_update.py#L435) | Local/remote update metadata. Versions are capped at 128 characters; digest has exactly 64 hex characters. |
 | `snug_ext.py` | No regex calls. |
 
-The two requested style fixes combine the native TAR inspection context managers at [`NativeBackend.inspect`](../snug_core.py#L1838) and replace the inode-list snapshot with a dictionary snapshot at [`NativeBackend._add_to_tar`](../snug_core.py#L1984). Snapshot semantics remain necessary because the loop deletes from the original dictionary. Existing TAR create/skip/header/stream tests cover these paths. The subsequent D.7 complexity refactors are recorded above.
+The two requested style fixes combine the native TAR inspection context managers at [`NativeBackend.inspect`](../snug_core.py#L1838) and replace the inode-list snapshot with a dictionary snapshot at [`NativeBackend._add_to_tar`](../snug_core.py#L1984). Snapshot semantics remain necessary because the loop deletes from the original dictionary. Existing TAR create/skip/header/stream tests cover these paths. The separately requested complexity refactors are recorded above.
