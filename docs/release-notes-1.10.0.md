@@ -10,7 +10,7 @@ The comparisons below use the released `v1.9.0` tag, commit `7bb6ab6`, as the ba
 
 Supported: macOS on Apple Silicon and Linux. Intel Macs may work but are not tested. This release ends Intel Mac testing and makes Apple Silicon the macOS priority. Python 3.10 or newer is still required. See [Installation](installation.md#requirements).
 
-CI is configured for Linux x86_64 on Python 3.10 to 3.14, Linux arm64 on Python 3.14, and macOS arm64 on Python 3.14. The Linux arm64 job is new and remains unverified until it runs on GitHub. See [Development](development.md#environment-and-checks).
+CI covers Linux x86_64 on Python 3.10 to 3.14. It also covers Linux arm64 and macOS arm64 on Python 3.14. [Run 38852221961](https://github.com/yklucz/snug/actions/runs/38852221961) for commit `34f24e9` passed the Linux arm64 job on `ubuntu-24.04-arm` with Python 3.14.8. That job reported 2,586 passed and 8 skipped. See [Development](development.md#environment-and-checks).
 
 ## Upgrade notes
 
