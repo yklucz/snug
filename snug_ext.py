@@ -58,7 +58,8 @@ def _text(value: Any) -> str:
 def _error_text(exc: Exception, password: str | None = None) -> str:
     message = str(exc)
     if password:
-        message = message.replace(password, "[redacted]")
+        for secret in dict.fromkeys((password, repr(password)[1:-1], ascii(password)[1:-1])):
+            message = message.replace(secret, "[redacted]")
     # Backend errors sometimes include untrusted filenames.
     return "".join(c if c.isprintable() else repr(c)[1:-1] for c in message)
 

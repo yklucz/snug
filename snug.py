@@ -703,9 +703,30 @@ def _tui_wrap(text: str, width: int) -> list[str]:
     return lines + [current]
 
 
-_TUI_QUOTED_PATH = re.compile(
-    r"(['\"])((?![A-Za-z][A-Za-z0-9+.-]*://)[^'\"]*[\\/][^'\"]*)\1")
+_TUI_QUOTE = re.compile(r"['\"]")
+_TUI_URL_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 _TUI_BARE_PATH = re.compile(r"(?<!\S)(?:/|[A-Za-z]:[\\/])[^\s'\"]+")
+
+
+def _tui_quoted_paths(line: str, budget: int) -> str:
+    """Inspect each span between quotes once, including failed path candidates."""
+    pieces: list[str] = []
+    copied = 0
+    start: int | None = None
+    for match in _TUI_QUOTE.finditer(line):
+        end = match.start()
+        if start is not None and line[start] == line[end]:
+            path = line[start + 1:end]
+            if (("/" in path or "\\" in path)
+                    and _TUI_URL_SCHEME.match(path) is None):
+                pieces.extend((line[copied:start + 1], _tui_middle(path, budget), line[end]))
+                copied = end + 1
+                start = None
+                continue
+        # A failed closing quote can open the next candidate, as before.
+        start = end
+    pieces.append(line[copied:])
+    return "".join(pieces)
 
 
 def _tui_pause_paths(line: str, width: int) -> str:
@@ -724,8 +745,7 @@ def _tui_pause_paths(line: str, width: int) -> str:
     if line.startswith(("Output: ", "Archive: ", "skipped: ")):
         prefix, path = line.split(": ", 1)
         return prefix + ": " + _tui_middle(path, budget)
-    line = _TUI_QUOTED_PATH.sub(
-        lambda match: match[1] + _tui_middle(match[2], budget) + match[1], line)
+    line = _tui_quoted_paths(line, budget)
     return _TUI_BARE_PATH.sub(lambda match: _tui_middle(match[0], budget), line)
 
 
@@ -1892,8 +1912,11 @@ def _menu_password_errors(password: str | None):
     try:
         yield
     except (ArchiveError, OSError, ValueError) as exc:
-        if password and password in str(exc):
-            message = str(exc).replace(password, "[redacted]")
+        message = str(exc)
+        if password:
+            for secret in dict.fromkeys((password, repr(password)[1:-1], ascii(password)[1:-1])):
+                message = message.replace(secret, "[redacted]")
+        if message != str(exc):
             if isinstance(exc, ArchiveError):
                 raise type(exc)(message) from None
             raise ArchiveError(message) from None
@@ -3406,14 +3429,15 @@ def _cli_error_text(args, exc: BaseException, member: str = "") -> str:
     # CreateError carries publication and skipped-input facts that must survive.
     create_policy_error = isinstance(exc, CreateError) and str(exc).startswith(
         ("cannot create archive ", "cannot replace archive "))
-    if not create_policy_error:
-        for error in chain:
-            if isinstance(error, OSError) and error.errno is not None:
-                message = _cli_os_error(args, error, member)
-                if isinstance(exc, CreateError):
-                    message += ("; the existing archive was preserved" if exc.preserved_existing
-                                else "; no archive was created")
-                return _safe(message)
+    if create_policy_error:
+        return _safe(_cli_archive_error(args, exc, member, chain))
+    for error in chain:
+        if isinstance(error, OSError) and error.errno is not None:
+            message = _cli_os_error(args, error, member)
+            if isinstance(exc, CreateError):
+                message += ("; the existing archive was preserved" if exc.preserved_existing
+                            else "; no archive was created")
+            return _safe(message)
     return _safe(_cli_archive_error(args, exc, member, chain))
 
 

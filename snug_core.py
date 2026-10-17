@@ -975,6 +975,26 @@ def _iter_sources(sources, root_abs: Path | None, cancel,
             yield src, _arcname_for(src, root_abs)
 
 
+def _skip_duplicate_item(fs_path: Path, name: str, seen_names: dict[str, Path],
+                         skip_errors: list[CreateSkip] | None) -> bool:
+    previous = seen_names.get(name)
+    if previous is None:
+        return False
+    same_source = os.path.realpath(fs_path) == os.path.realpath(previous)
+    if not same_source:
+        try:
+            same_source = os.path.samefile(fs_path, previous)
+        except OSError:
+            # Identity is unclear after a source disappears. Retain
+            # the existing duplicate-name behavior in that case.
+            same_source = True
+    if not same_source and skip_errors is not None:
+        skip_errors.append(CreateSkip(
+            fs_path, f"archive name {name!r} also belongs to {previous}",
+        ))
+    return True
+
+
 def _iter_items(sources, *, root, symlinks: str, archive_real: str, cancel=None,
                 skip_errors: list[CreateSkip] | None = None):
     """Yield unique archive items, optionally stopping when *cancel* is set."""
@@ -988,20 +1008,7 @@ def _iter_items(sources, *, root, symlinks: str, archive_real: str, cancel=None,
                 return
             if not name or os.path.realpath(fs_path) == archive_real:
                 continue
-            previous = seen_names.get(name)
-            if previous is not None:
-                same_source = os.path.realpath(fs_path) == os.path.realpath(previous)
-                if not same_source:
-                    try:
-                        same_source = os.path.samefile(fs_path, previous)
-                    except OSError:
-                        # Identity is unclear after a source disappears. Retain
-                        # the existing duplicate-name behavior in that case.
-                        same_source = True
-                if not same_source and skip_errors is not None:
-                    skip_errors.append(CreateSkip(
-                        fs_path, f"archive name {name!r} also belongs to {previous}",
-                    ))
+            if _skip_duplicate_item(fs_path, name, seen_names, skip_errors):
                 continue
             seen_names[name] = fs_path
             yield fs_path, name
@@ -1837,11 +1844,13 @@ class NativeBackend:
                                          {"encrypted": any(i.flag_bits & 1 for i in infos)})
         if password is not None:
             raise ArchiveError(_TAR_PASSWORD_MESSAGE)
-        with _inspection_tar_stream(path, fmt) as source:
-            with tarfile.open(fileobj=source, mode="r:") as tf:
-                entries = [_tar_entry(member) for member in tf.getmembers()]
-                source.walker.finish()
-                return ArchiveInspection(entries, {"encrypted": False})
+        with (
+            _inspection_tar_stream(path, fmt) as source,
+            tarfile.open(fileobj=source, mode="r:") as tf,
+        ):
+            entries = [_tar_entry(member) for member in tf.getmembers()]
+            source.walker.finish()
+            return ArchiveInspection(entries, {"encrypted": False})
 
     def list_entries(self, path: Path, password=None) -> list[ArchiveEntry]:
         return self.inspect(path, password).entries
@@ -1958,24 +1967,31 @@ class NativeBackend:
             tf.addfile(ti)
             report.directories += 1
         elif ti.isreg():
-            try:
-                fh = open(fs_path, "rb")
-            except OSError as exc:
-                # gettarinfo caches the inode before payload opening. A later
-                # alias must not become a hardlink to this omitted member.
-                for inode, name in list(tf.inodes.items()):
-                    if name == ti.name:
-                        del tf.inodes[inode]
-                report.record_skip(fs_path, exc.strerror or str(exc))
+            if not NativeBackend._tar_add_regular_file(tf, fs_path, ti, report, progress):
                 return
-            with fh:
-                reader = _ProgressReader(fh, progress.chunk)
-                tf.addfile(ti, fileobj=reader)
-            report.files += 1
-            report.bytes_in += ti.size
         else:
             tf.addfile(ti)
         report.included_inputs += 1
+
+    @staticmethod
+    def _tar_add_regular_file(tf, fs_path: Path, ti,
+                              report: CreateReport, progress: ProgressSink) -> bool:
+        try:
+            fh = open(fs_path, "rb")
+        except OSError as exc:
+            # gettarinfo caches the inode before payload opening. A later
+            # alias must not become a hardlink to this omitted member.
+            for inode, name in tf.inodes.copy().items():
+                if name == ti.name:
+                    del tf.inodes[inode]
+            report.record_skip(fs_path, exc.strerror or str(exc))
+            return False
+        with fh:
+            reader = _ProgressReader(fh, progress.chunk)
+            tf.addfile(ti, fileobj=reader)
+        report.files += 1
+        report.bytes_in += ti.size
+        return True
 
     # -- ZIP creation ---------------------------------------------------- #
 
@@ -2640,6 +2656,41 @@ class ArchiveEngine:
         total_bytes = sum(_file_size(p, follow=symlinks == "follow") for p, _ in items)
         return items, total_bytes
 
+    @staticmethod
+    def _publish_created_archive(tmp_path: Path, archive_path: Path,
+                                 report: CreateReport, existing_output: bool):
+        if report.accidental_skips:
+            if not report.included_inputs:
+                raise CreateError(
+                    f"cannot create archive {archive_path}: no inputs could be included; "
+                    "inputs were skipped because of an error; no archive was created", report,
+                    preserved_existing=existing_output,
+                )
+            if os.path.lexists(archive_path):
+                raise CreateError(
+                    f"cannot replace archive {archive_path}: inputs were skipped "
+                    "because of an error; the existing archive was preserved", report,
+                    preserved_existing=True,
+                )
+            try:
+                # Link publication is exclusive: an output appearing
+                # after the existence check must also be preserved.
+                os.link(tmp_path, archive_path)
+            except FileExistsError as exc:
+                raise CreateError(
+                    f"cannot replace archive {archive_path}: inputs were skipped "
+                    "because of an error; the existing archive was preserved", report,
+                    preserved_existing=True,
+                ) from exc
+            try:
+                tmp_path.unlink()
+            except OSError as exc:
+                report.cleanup_warning = (
+                    f"could not remove temporary archive {tmp_path}: {exc.strerror or str(exc)}"
+                )
+        else:
+            os.replace(tmp_path, archive_path)
+
     def create(self, archive, sources: Iterable[str | os.PathLike[str]], *,
                fmt: ArchiveFormat | str | None = None,
                root: str | os.PathLike[str] | None = None,
@@ -2679,37 +2730,7 @@ class ArchiveEngine:
                 with _create_staging_file(archive_path) as tmp_path:
                     backend.create(tmp_path, items, fmt, compresslevel, symlinks,
                                    report, progress, password=password)
-                    if report.accidental_skips:
-                        if not report.included_inputs:
-                            raise CreateError(
-                                f"cannot create archive {archive_path}: no inputs could be included; "
-                                "inputs were skipped because of an error; no archive was created", report,
-                                preserved_existing=existing_output,
-                            )
-                        if os.path.lexists(archive_path):
-                            raise CreateError(
-                                f"cannot replace archive {archive_path}: inputs were skipped "
-                                "because of an error; the existing archive was preserved", report,
-                                preserved_existing=True,
-                            )
-                        try:
-                            # Link publication is exclusive: an output appearing
-                            # after the existence check must also be preserved.
-                            os.link(tmp_path, archive_path)
-                        except FileExistsError as exc:
-                            raise CreateError(
-                                f"cannot replace archive {archive_path}: inputs were skipped "
-                                "because of an error; the existing archive was preserved", report,
-                                preserved_existing=True,
-                            ) from exc
-                        try:
-                            tmp_path.unlink()
-                        except OSError as exc:
-                            report.cleanup_warning = (
-                                f"could not remove temporary archive {tmp_path}: {exc.strerror or str(exc)}"
-                            )
-                    else:
-                        os.replace(tmp_path, archive_path)
+                    self._publish_created_archive(tmp_path, archive_path, report, existing_output)
             except BaseException as exc:
                 report.accidental_skips = len(report.skip_errors)
                 if report.accidental_skips and isinstance(exc, Exception) and not isinstance(exc, CreateError):
